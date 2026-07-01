@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 
-METHOD_DEFAULT = "idea1_sac_medsam_iterative_gt_iou"
+METHOD_DEFAULT = "idea1_iterclean_bank_adaptshape"
 KNOWN_3D_DATASETS = {"btcv", "synapse", "acdc", "prostate158"}
 
 
