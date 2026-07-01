@@ -1,0 +1,78 @@
+# Python cache
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+*.egg-info/
+
+# Editors and local tools
+.vscode/
+.idea/
+.codex/
+*.code-workspace
+
+# Backup and temporary files
+*.bak
+*.bak_*
+*~
+*_backup_*
+_accidental_files_backup_/
+*.log
+
+# Datasets
+/data/raw/
+/data/organized/
+/data/processed/
+/data/progress/
+
+# Training and generated outputs
+/work_dir/
+/MedSAM_ft/
+/logs/
+/outputs/
+/results/
+/checkpoints/
+/afd_draw/
+/aqa_draw/
+/vis/
+/visualization/
+/predictions/
+/pred_test/
+
+# Large generated files and weights
+*.pth
+*.pt
+*.ckpt
+*.onnx
+*.npy
+*.npz
+*.nii
+*.nii.gz
+*.mha
+*.mhd
+*.h5
+*.hdf5
+*.whl
+
+# Local inspection records
+fold0_tree.txt
+label_meta_dump.txt
+manifest_head.txt
+split_meta_dump.txt
+run_stage2.log
+
+# Large local document
+assets/MedSAM_supp.pdf
+
+# System files
+.DS_Store
+Thumbs.db
+
+# Local assistant/tool configuration
+/.codex/
+
+# All runtime datasets under repository root
+/data/
+
+# Deprecated local archive
+/nouse/

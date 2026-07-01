@@ -1,0 +1,80 @@
+{
+  "btcv": {
+    "hw": [512, 512],
+    "selection_policy": "project_evidence_informed_override",
+    "selection_basis": "abdominal_ct_highres_512",
+    "selection_note": "Set to 512x512 as the BTCV student-space crop for this project."
+  },
+  "kvasirseg": {
+    "hw": [352, 352],
+    "selection_policy": "literature_backed",
+    "selection_basis": "polyp_segmentation_common_352",
+    "selection_note": "Common 352x352 setting in polyp segmentation."
+  },
+  "cvc_clinicdb": {
+    "hw": [352, 352],
+    "selection_policy": "literature_backed",
+    "selection_basis": "polyp_segmentation_common_352",
+    "selection_note": "Common 352x352 setting in polyp segmentation."
+  },
+  "tn3k": {
+    "hw": [256, 256],
+    "selection_policy": "literature_backed",
+    "selection_basis": "thyroid_ultrasound_common_256",
+    "selection_note": "Common 256x256 setting in thyroid ultrasound segmentation."
+  },
+  "tg3k": {
+    "hw": [256, 256],
+    "selection_policy": "literature_backed",
+    "selection_basis": "thyroid_ultrasound_common_256",
+    "selection_note": "Common 256x256 setting in thyroid ultrasound segmentation."
+  },
+  "ddti": {
+    "hw": [256, 256],
+    "selection_policy": "literature_backed",
+    "selection_basis": "thyroid_ultrasound_common_256",
+    "selection_note": "Common 256x256 setting in thyroid ultrasound segmentation."
+  },
+  "drive": {
+    "hw": [512, 512],
+    "selection_policy": "literature_backed",
+    "selection_basis": "retinal_vessel_common_train_512",
+    "selection_note": "Common 512x512 training resolution for DRIVE."
+  },
+  "chasedb1": {
+    "hw": [512, 512],
+    "selection_policy": "literature_backed",
+    "selection_basis": "retinal_vessel_common_train_512",
+    "selection_note": "Common 512x512 training resolution for CHASEDB1."
+  },
+  "hrf": {
+    "hw": [1024, 1024],
+    "selection_policy": "literature_backed",
+    "selection_basis": "retinal_vessel_common_train_1024",
+    "selection_note": "Common 1024x1024 training resolution for HRF."
+  },
+  "monuseg": {
+    "hw": [512, 512],
+    "selection_policy": "literature_backed",
+    "selection_basis": "monuseg_common_512",
+    "selection_note": "Common 512x512 setting in nuclei segmentation."
+  },
+  "ph2": {
+    "hw": [256, 256],
+    "selection_policy": "literature_backed_but_not_unique",
+    "selection_basis": "dermoscopy_common_256",
+    "selection_note": "A common efficient PH2 setting."
+  },
+  "acdc": {
+    "hw": [320, 320],
+    "selection_policy": "modality_informed_default",
+    "selection_basis": "cardiac_mri_typical_shape_320",
+    "selection_note": "Stable default for cardiac MRI student space."
+  },
+  "prostate158": {
+    "hw": [320, 320],
+    "selection_policy": "modality_informed_default",
+    "selection_basis": "prostate_mri_common_320",
+    "selection_note": "Stable default for prostate MRI student space."
+  }
+}
