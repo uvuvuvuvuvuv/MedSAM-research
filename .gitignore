@@ -76,3 +76,5 @@ Thumbs.db
 
 # Deprecated local archive
 /nouse/
+CLAUDE.local.md
+.claude/settings.local.json
