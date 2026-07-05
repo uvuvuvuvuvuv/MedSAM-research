@@ -10,20 +10,33 @@ from typing import Any
 
 import numpy as np
 
+# ---------------------------------------------------------------------------
+# Import from shared modules
+# ---------------------------------------------------------------------------
+try:
+    from .pipeline_common import (
+        METHOD_DEFAULT,
+        build_fold_paths,
+        is_3d_dataset,
+        save_json_atomic,
+        validate_writable_path,
+    )
+except ImportError:
+    from pipeline_common import (  # type: ignore[no-redef]
+        METHOD_DEFAULT,
+        build_fold_paths,
+        is_3d_dataset,
+        save_json_atomic,
+        validate_writable_path,
+    )
 
-KNOWN_3D_DATASETS = {"btcv", "synapse", "acdc", "prostate158"}
+
 UNKNOWN_LABEL = 255
 
 
 def load_json(path: Path) -> Any:
     with path.open("r", encoding="utf-8") as f:
         return json.load(f)
-
-
-def save_json(obj: Any, path: Path) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8") as f:
-        json.dump(obj, f, indent=2, ensure_ascii=False)
 
 
 def save_csv(
@@ -116,7 +129,7 @@ def infer_is_3d(
     dataset: str,
     split_meta: dict[str, Any],
 ) -> bool:
-    if dataset.lower() in KNOWN_3D_DATASETS:
+    if is_3d_dataset(dataset):
         return True
 
     for key in ("is_3d", "volume_level_split", "has_volume"):
@@ -342,24 +355,26 @@ def process_dataset(
     args: argparse.Namespace,
     dataset: str,
 ) -> None:
-    fold_root = args.processed_root / dataset / args.fold
-    meta_dir = fold_root / "meta"
+    paths = build_fold_paths(
+        processed_root=args.processed_root,
+        dataset=dataset,
+        fold=args.fold,
+        method=args.method,
+        round_tag=args.round_tag,
+    )
+    fold_root = paths["fold_root"]
+    meta_dir = paths["meta_dir"]
+    run_id = paths["run_id"]
 
     manifest_path = meta_dir / "manifest.json"
     split_meta_path = meta_dir / "split_meta.json"
     label_meta_path = meta_dir / "label_meta.json"
-    split_path = meta_dir / f"full_box_split_{args.method}.json"
-    selection_path = meta_dir / f"full_selection_{args.method}.json"
-    pseudo_dir = (
-        fold_root
-        / "pseudo_teacher"
-        / f"tri_train_{args.method}"
-    )
+    split_path = paths["split_path"]
+    pseudo_dir = paths["pseudo_teacher_dir"]
 
     for required_path in (
         manifest_path,
         split_path,
-        selection_path,
         pseudo_dir,
     ):
         if not required_path.exists():
@@ -369,7 +384,6 @@ def process_dataset(
 
     manifest = load_json(manifest_path)
     split_records = load_json(split_path)
-    current_selection = load_json(selection_path)
     split_meta = (
         load_json(split_meta_path)
         if split_meta_path.exists()
@@ -385,8 +399,6 @@ def process_dataset(
         raise TypeError("manifest.json must contain a list")
     if not isinstance(split_records, list):
         raise TypeError("Full/Box split must contain a list")
-    if not isinstance(current_selection, dict):
-        raise TypeError("Current selection must contain a JSON object")
     if not isinstance(split_meta, dict):
         raise TypeError("split_meta.json must contain a JSON object")
 
@@ -434,20 +446,6 @@ def process_dataset(
         for name, record in split_by_slice.items()
         if str(record["label_mode"]) == "box"
     }
-
-    selection_full_slices = {
-        str(name)
-        for name in current_selection.get(
-            "cumulative_full_slice_names",
-            [],
-        )
-    }
-
-    if selection_full_slices != current_full_slices:
-        raise RuntimeError(
-            "full_selection_<method>.json does not match "
-            "full_box_split_<method>.json"
-        )
 
     if args.select_count > len(current_box_slices):
         raise ValueError(
@@ -528,23 +526,27 @@ def process_dataset(
         )
 
     next_round = args.round_id + 1
-    hard_selection_path = (
-        meta_dir / f"hard_selection_{args.method}.json"
-    )
-    hard_summary_path = (
-        meta_dir / f"hard_selection_summary_{args.method}.json"
-    )
+    hard_selection_path = paths["hard_selection_path"]
+    hard_summary_path = paths["hard_summary_path"]
     next_selection_path = (
         meta_dir / f"full_selection_round_{next_round}.json"
     )
 
     if is_3d:
         slice_ranking_path = (
-            meta_dir / f"hard_slice_ranking_{args.method}.csv"
+            meta_dir / f"hard_slice_ranking_{run_id}.csv"
         )
         case_ranking_path = (
-            meta_dir / f"hard_case_ranking_{args.method}.csv"
+            meta_dir / f"hard_case_ranking_{run_id}.csv"
         )
+        for out_path in (
+            hard_selection_path,
+            hard_summary_path,
+            next_selection_path,
+            slice_ranking_path,
+            case_ranking_path,
+        ):
+            validate_writable_path(out_path)
         check_output_paths(
             [
                 hard_selection_path,
@@ -801,8 +803,15 @@ def process_dataset(
 
     else:
         ranking_path = (
-            meta_dir / f"hard_ranking_{args.method}.csv"
+            meta_dir / f"hard_ranking_{run_id}.csv"
         )
+        for out_path in (
+            hard_selection_path,
+            hard_summary_path,
+            next_selection_path,
+            ranking_path,
+        ):
+            validate_writable_path(out_path)
         check_output_paths(
             [
                 hard_selection_path,
@@ -933,6 +942,8 @@ def process_dataset(
         "dataset": dataset,
         "fold": args.fold,
         "method": args.method,
+        "round_tag": args.round_tag,
+        "run_id": run_id,
         "round_id": int(args.round_id),
         "next_round_id": int(next_round),
         "is_3d": bool(is_3d),
@@ -949,7 +960,7 @@ def process_dataset(
         "cumulative_full_unit_count": cumulative_full_units,
         "new_selected_units": selected_units,
         "pseudo_dir": str(pseudo_dir),
-        "current_selection_path": str(selection_path),
+        "current_selection_path": str(hard_selection_path),
         "next_full_selection_path": str(next_selection_path),
         "gt_usage": (
             "Teacher-space train GT is used only in this selector "
@@ -959,9 +970,9 @@ def process_dataset(
         "selection_complete": True,
     }
 
-    save_json(hard_payload, hard_selection_path)
-    save_json(selection_payload, next_selection_path)
-    save_json(summary_payload, hard_summary_path)
+    save_json_atomic(hard_payload, hard_selection_path)
+    save_json_atomic(selection_payload, next_selection_path)
+    save_json_atomic(summary_payload, hard_summary_path)
 
     print(f"[OK] hard-sample selection: {dataset}/{args.fold}")
     print(
@@ -1011,7 +1022,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--method",
+        default=METHOD_DEFAULT,
+        help="Method identifier (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--round_tag",
         required=True,
+        help="Round tag, e.g. r00_full5 (2D) or r00_case1 (3D)",
     )
     parser.add_argument(
         "--round_id",

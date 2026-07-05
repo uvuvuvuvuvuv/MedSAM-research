@@ -17,6 +17,24 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
+# ---------------------------------------------------------------------------
+# Import from shared modules
+# ---------------------------------------------------------------------------
+try:
+    from .pipeline_common import (
+        METHOD_DEFAULT,
+        build_fold_paths,
+        is_3d_dataset,
+        save_json_atomic,
+    )
+except ImportError:
+    from pipeline_common import (  # type: ignore[no-redef]
+        METHOD_DEFAULT,
+        build_fold_paths,
+        is_3d_dataset,
+        save_json_atomic,
+    )
+
 
 DEFAULT_PROCESSED_ROOT = Path(
     "/storage/baiyuting/data/out_data_idea1/"
@@ -35,18 +53,20 @@ DEFAULT_RUNNER_ROOT = Path(
     "MedSAM-main/work_dir/iterative_sampling_runs"
 )
 
-KNOWN_3D_DATASETS = {
-    "btcv",
-    "synapse",
-    "acdc",
-    "prostate158",
-}
-
 PRESET_SCHEDULES: dict[str, list[int]] = {
-    "smoke_2d": [5, 7],
     "formal_2d": [5, 10, 15, 20],
     "formal_3d": [1, 2, 3, 4, 5],
 }
+
+def _formal_schedule(is_3d: bool) -> list[int]:
+    """Full formal schedule independent of --preset or --end_round."""
+    return list(PRESET_SCHEDULES["formal_3d" if is_3d else "formal_2d"])
+
+
+def is_formal_final_round(round_id: int, is_3d: bool) -> bool:
+    """True only when round_id is the last round of the full formal schedule."""
+    return round_id == len(_formal_schedule(is_3d)) - 1
+
 
 SCRIPT_NAMES = {
     "split": "01_build_full_box_split.py",
@@ -82,15 +102,6 @@ def utc_now() -> str:
 def load_json(path: Path) -> Any:
     with path.open("r", encoding="utf-8") as f:
         return json.load(f)
-
-
-def save_json(obj: Any, path: Path) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(path.suffix + ".tmp")
-    with temporary.open("w", encoding="utf-8") as f:
-        json.dump(obj, f, indent=2, ensure_ascii=False)
-        f.write("\n")
-    temporary.replace(path)
 
 
 def append_jsonl(obj: Any, path: Path) -> None:
@@ -188,7 +199,7 @@ def infer_is_3d(
     dataset: str,
     fold: str,
 ) -> bool:
-    if dataset.lower() in KNOWN_3D_DATASETS:
+    if is_3d_dataset(dataset):
         return True
 
     split_meta_path = (
@@ -243,46 +254,15 @@ def get_case_id(record: dict[str, Any]) -> str:
     return str(value)
 
 
-def build_method_names(
-    args: argparse.Namespace,
+def build_round_tags(
     schedule: list[int],
+    is_3d: bool,
 ) -> list[str]:
-    if args.method_names:
-        names = parse_csv_strings(args.method_names)
-        if len(names) != len(schedule):
-            raise ValueError(
-                "--method_names must contain exactly one name "
-                "for each schedule entry: "
-                f"schedule={schedule}, names={names}"
-            )
-    else:
-        prefix = args.method_prefix.strip()
-        if not prefix:
-            raise ValueError("--method_prefix is empty")
-
-        suffix = args.method_suffix.strip().strip("_")
-        names = []
-        for round_id, full_count in enumerate(schedule):
-            method = (
-                f"{prefix}_r{round_id}_full{full_count}"
-            )
-            if suffix:
-                method += f"_{suffix}"
-            names.append(method)
-
-    for name in names:
-        if name != sanitize_name(name):
-            raise ValueError(
-                "Method names may only contain letters, numbers, "
-                f"underscore, hyphen and dot: {name!r}"
-            )
-
-    if len(names) != len(set(names)):
-        raise ValueError(
-            f"Method names are not unique: {names}"
-        )
-
-    return names
+    unit = "case" if is_3d else "full"
+    return [
+        f"r{idx:02d}_{unit}{count}"
+        for idx, count in enumerate(schedule)
+    ]
 
 
 def determine_schedule(
@@ -305,12 +285,12 @@ def determine_schedule(
 def default_run_name(
     datasets: list[str],
     schedule: list[int],
-    method_names: list[str],
+    method: str,
 ) -> str:
     dataset_token = "-".join(datasets)
     schedule_token = "-".join(str(x) for x in schedule)
     return sanitize_name(
-        f"{dataset_token}_{schedule_token}_{method_names[0]}"
+        f"{dataset_token}_{schedule_token}_{method}"
     )
 
 
@@ -422,7 +402,7 @@ def validate_dimension_group(
 
     is_3d = next(iter(unique_dimensions))
 
-    if args.preset in {"smoke_2d", "formal_2d"} and is_3d:
+    if args.preset == "formal_2d" and is_3d:
         raise ValueError(
             f"Preset {args.preset!r} is for 2D datasets, "
             f"but datasets are 3D: {datasets}"
@@ -439,106 +419,66 @@ def round_output_paths(
     args: argparse.Namespace,
     dataset: str,
     method: str,
+    round_tag: str,
 ) -> dict[str, Path]:
-    fold_root = (
-        args.processed_root
-        / dataset
-        / args.fold
+    p = build_fold_paths(
+        processed_root=args.processed_root,
+        dataset=dataset,
+        fold=args.fold,
+        method=method,
+        round_tag=round_tag,
+        medsam_ft_root=args.medsam_ft_root,
     )
-    meta_dir = fold_root / "meta"
-
-    train_root = (
-        args.medsam_ft_root
-        / method
-        / dataset
-        / args.fold
-    )
+    run_id = p["run_id"]
+    meta_dir = p["meta_dir"]
+    train_root = p["train_root"]
+    fold_root = p["fold_root"]
 
     return {
         "fold_root": fold_root,
         "meta_dir": meta_dir,
-        "split": (
-            meta_dir
-            / f"full_box_split_{method}.json"
-        ),
-        "split_summary": (
-            meta_dir
-            / f"full_box_split_summary_{method}.json"
-        ),
-        "method_selection": (
-            meta_dir
-            / f"full_selection_{method}.json"
-        ),
-        "template": (
-            meta_dir
-            / f"support_template_{method}.npz"
-        ),
-        "template_stats": (
-            meta_dir
-            / f"support_template_stats_{method}.json"
-        ),
+        "run_id": run_id,
+        "split": p["split_path"],
+        "split_summary": p["split_summary_path"],
+        "template": p["support_path"],
+        "template_stats": p["support_stats_path"],
         "feature_audit": (
             meta_dir
-            / f"feature_extraction_audit_{method}.json"
+            / f"feature_extraction_audit_{run_id}.json"
         ),
         "train_root": train_root,
-        "train_last": (
-            train_root
-            / "medsam_sac_last.pth"
-        ),
-        "train_ema": (
-            train_root
-            / "medsam_sac_ema.pth"
-        ),
-        "train_log": (
-            train_root
-            / f"medsam_ft_log_{method}.csv"
-        ),
-        "train_summary": (
-            train_root
-            / f"medsam_ft_summary_{method}.json"
-        ),
-        "pseudo_teacher": (
-            fold_root
-            / "pseudo_teacher"
-            / f"tri_train_{method}"
-        ),
-        "pseudo_student": (
-            fold_root
-            / "pseudo_student"
-            / f"tri_train_{method}"
-        ),
+        "train_last": p["train_last_path"],
+        "train_ema": p["train_ema_path"],
+        "train_log": p["train_log_path"],
+        "train_summary": p["train_summary_path"],
+        "pseudo_teacher": p["pseudo_teacher_dir"],
+        "pseudo_student": p["pseudo_student_dir"],
         "pseudo_audit": (
             meta_dir
-            / f"pseudo_generation_output_audit_{method}.json"
+            / f"pseudo_generation_output_audit_{run_id}.json"
         ),
         "pseudo_config": (
             meta_dir
-            / f"pseudo_generation_config_{method}.json"
+            / f"pseudo_generation_config_{run_id}.json"
         ),
         "pseudo_stats": (
             meta_dir
-            / f"pseudo_quality_stats_{method}.csv"
+            / f"pseudo_quality_stats_{run_id}.csv"
         ),
-        "hard_selection": (
-            meta_dir
-            / f"hard_selection_{method}.json"
-        ),
-        "hard_summary": (
-            meta_dir
-            / f"hard_selection_summary_{method}.json"
-        ),
+        "round_summary": p["round_summary_path"],
+        "hard_selection": p["hard_selection_path"],
+        "hard_summary": p["hard_summary_path"],
         "hard_ranking_2d": (
             meta_dir
-            / f"hard_ranking_{method}.csv"
+            / f"hard_ranking_{run_id}.csv"
         ),
         "hard_slice_ranking_3d": (
             meta_dir
-            / f"hard_slice_ranking_{method}.csv"
+            / f"hard_slice_ranking_{run_id}.csv"
         ),
         "hard_case_ranking_3d": (
             meta_dir
-            / f"hard_case_ranking_{method}.csv"
+            / f"hard_case_ranking_{run_id}.csv"
         ),
     }
 
@@ -547,6 +487,7 @@ def validate_split_stage(
     args: argparse.Namespace,
     dataset: str,
     method: str,
+    round_tag: str,
     expected_full_units: int,
     is_3d: bool,
 ) -> tuple[bool, str]:
@@ -554,12 +495,12 @@ def validate_split_stage(
         args,
         dataset,
         method,
+        round_tag,
     )
 
     required = (
         paths["split"],
         paths["split_summary"],
-        paths["method_selection"],
     )
 
     missing = [
@@ -655,17 +596,17 @@ def validate_npz_template(
         return False, "template has no class_ids.npy"
 
     has_fg = any(
-        name.startswith("proto_fg_c")
+        name.startswith("bank_fg_c")
         and name.endswith(".npy")
         for name in names
     )
     has_bg = any(
-        name.startswith("proto_bg_c")
+        name.startswith("bank_bg_c")
         and name.endswith(".npy")
         for name in names
     )
     has_shape = any(
-        name.startswith("shape_A_c")
+        name.startswith("shape_templates_c")
         and name.endswith(".npy")
         for name in names
     )
@@ -673,7 +614,7 @@ def validate_npz_template(
     if not (has_fg and has_bg and has_shape):
         return False, (
             "template is missing foreground/background "
-            "prototypes or shape_A"
+            "bank features or shape_templates"
         )
 
     return True, (
@@ -685,72 +626,58 @@ def validate_template_stage(
     args: argparse.Namespace,
     dataset: str,
     method: str,
+    round_tag: str,
 ) -> tuple[bool, str]:
     paths = round_output_paths(
         args,
         dataset,
         method,
+        round_tag,
     )
 
-    for key in (
-        "template_stats",
-        "feature_audit",
-    ):
-        if not paths[key].is_file():
-            return False, f"missing {key}: {paths[key]}"
+    if not paths["template"].is_file():
+        return False, f"missing template: {paths['template']}"
 
-    ok, reason = validate_npz_template(
-        paths["template"]
-    )
+    ok, reason = validate_npz_template(paths["template"])
     if not ok:
         return False, reason
 
+    if not paths["template_stats"].is_file():
+        return False, f"missing template_stats: {paths['template_stats']}"
+
     try:
-        audit = load_json(paths["feature_audit"])
+        stats = load_json(paths["template_stats"])
     except Exception as exc:
-        return False, f"cannot read feature audit: {exc}"
+        return False, f"cannot read template stats: {exc}"
 
-    if not isinstance(audit, dict):
-        return False, "feature audit is not an object"
+    if not isinstance(stats, dict):
+        return False, "template stats is not an object"
 
-    if audit.get("method") != method:
+    if stats.get("method") != method:
         return False, (
-            "feature audit method mismatch: "
-            f"{audit.get('method')!r}"
+            "template stats method mismatch: "
+            f"{stats.get('method')!r}"
         )
 
-    if audit.get("dataset") != dataset:
+    if stats.get("dataset") != dataset:
         return False, (
-            "feature audit dataset mismatch: "
-            f"{audit.get('dataset')!r}"
+            "template stats dataset mismatch: "
+            f"{stats.get('dataset')!r}"
         )
 
-    if audit.get("feature_extraction_complete") is not True:
+    processed_count = int(stats.get("num_full_records", 0))
+    if processed_count <= 0:
         return False, (
-            "feature_extraction_complete is not true"
+            f"template stats: num_full_records={processed_count} "
+            f"is not positive"
         )
 
-    if audit.get("encoder_frozen") is not True:
-        return False, "encoder_frozen is not true"
-
-    missing_manifest = int(
-        audit.get(
-            "num_missing_manifest_records",
-            -1,
-        )
-    )
-    if missing_manifest != 0:
+    skipped = int(stats.get("skipped_or_invalid_count", -1))
+    if skipped != 0:
         return False, (
-            "feature audit reports missing manifest records: "
-            f"{missing_manifest}"
+            f"template stats reports skipped/ invalid records: "
+            f"{skipped}"
         )
-
-    processed_count = int(
-        audit.get(
-            "num_successfully_processed_full_records",
-            0,
-        )
-    )
 
     return True, (
         f"{reason}; processed Full slices={processed_count}"
@@ -761,11 +688,13 @@ def validate_train_stage(
     args: argparse.Namespace,
     dataset: str,
     method: str,
+    round_tag: str,
 ) -> tuple[bool, str]:
     paths = round_output_paths(
         args,
         dataset,
         method,
+        round_tag,
     )
 
     for key in (
@@ -818,11 +747,13 @@ def validate_pseudo_stage(
     args: argparse.Namespace,
     dataset: str,
     method: str,
+    round_tag: str,
 ) -> tuple[bool, str]:
     paths = round_output_paths(
         args,
         dataset,
         method,
+        round_tag,
     )
 
     for key in (
@@ -900,6 +831,7 @@ def validate_selection_stage(
     args: argparse.Namespace,
     dataset: str,
     method: str,
+    round_tag: str,
     previous_full_units: int,
     next_full_units: int,
     is_3d: bool,
@@ -908,6 +840,7 @@ def validate_selection_stage(
         args,
         dataset,
         method,
+        round_tag,
     )
 
     required_keys = [
@@ -1063,6 +996,7 @@ def create_or_validate_selection_snapshot(
     run_dir: Path,
     dataset: str,
     method: str,
+    round_tag: str,
     round_id: int,
     next_round_id: int,
     expected_next_units: int,
@@ -1095,6 +1029,7 @@ def create_or_validate_selection_snapshot(
         args,
         dataset,
         method,
+        round_tag,
     )
 
     hard_payload = load_json(
@@ -1134,7 +1069,7 @@ def create_or_validate_selection_snapshot(
             f"actual={payload['cumulative_full_count']}"
         )
 
-    save_json(payload, snapshot)
+    save_json_atomic(payload, snapshot)
     return snapshot
 
 
@@ -1143,6 +1078,7 @@ def build_split_command(
     scripts: dict[str, Path],
     dataset: str,
     method: str,
+    round_tag: str,
     round_id: int,
     full_count: int,
     selection_file: Path | None,
@@ -1159,6 +1095,8 @@ def build_split_command(
         args.fold,
         "--method",
         method,
+        "--round_tag",
+        round_tag,
         "--round_id",
         str(round_id),
         "--sampling_mode",
@@ -1192,6 +1130,7 @@ def build_template_command(
     scripts: dict[str, Path],
     dataset: str,
     method: str,
+    round_tag: str,
     stage_overwrite: bool,
 ) -> list[str]:
     command = [
@@ -1207,20 +1146,20 @@ def build_template_command(
         args.fold,
         "--method",
         method,
+        "--round_tag",
+        round_tag,
         "--device",
         args.device,
         "--seed",
         str(args.seed),
-        "--k_fg",
-        str(args.k_fg),
-        "--k_bg",
-        str(args.k_bg),
-        "--max_fg_per_image",
-        str(args.max_fg_per_image),
-        "--max_bg_per_image",
-        str(args.max_bg_per_image),
-        "--max_total_features",
-        str(args.max_total_features),
+        "--kmax_shape",
+        str(args.kmax_shape),
+        "--shape_size",
+        str(args.shape_size),
+        "--cluster_max_iter",
+        str(args.cluster_max_iter),
+        "--ring_expand_ratio",
+        str(args.ring_expand_ratio),
     ]
 
     if stage_overwrite:
@@ -1234,12 +1173,9 @@ def build_train_command(
     scripts: dict[str, Path],
     dataset: str,
     method: str,
+    round_tag: str,
+    stage_overwrite: bool,
 ) -> list[str]:
-    out_root = (
-        args.medsam_ft_root
-        / method
-    )
-
     command = [
         str(args.python),
         str(scripts["train"]),
@@ -1253,8 +1189,10 @@ def build_train_command(
         args.fold,
         "--method",
         method,
-        "--out_root",
-        str(out_root),
+        "--round_tag",
+        round_tag,
+        "--medsam_ft_root",
+        str(args.medsam_ft_root),
         "--device",
         args.device,
         "--seed",
@@ -1271,43 +1209,12 @@ def build_train_command(
         str(args.ema_decay),
         "--max_grad_norm",
         str(args.max_grad_norm),
-        "--lambda_out",
-        str(args.lambda_out),
-        "--lambda_seed",
-        str(args.lambda_seed),
-        "--lambda_wac",
-        str(args.lambda_wac),
-        "--lambda_proto",
-        str(args.lambda_proto),
-        "--lambda_smooth",
-        str(args.lambda_smooth),
-        "--seed_p_threshold",
-        str(args.seed_p_threshold),
-        "--seed_qf_threshold",
-        str(args.seed_qf_threshold),
-        "--proto_p_low",
-        str(args.proto_p_low),
-        "--proto_p_high",
-        str(args.proto_p_high),
-        "--weak1_low",
-        str(args.weak1_low),
-        "--weak1_high",
-        str(args.weak1_high),
-        "--weak2_low",
-        str(args.weak2_low),
-        "--weak2_high",
-        str(args.weak2_high),
-        "--weak2_weight",
-        str(args.weak2_weight),
-        "--strong_p_threshold",
-        str(args.strong_p_threshold),
-        "--strong_qf_threshold",
-        str(args.strong_qf_threshold),
-        "--wac_kernel",
-        str(args.wac_kernel),
         "--log_every",
         str(args.train_log_every),
     ]
+
+    if stage_overwrite:
+        command.append("--overwrite")
 
     return command
 
@@ -1317,6 +1224,7 @@ def build_pseudo_command(
     scripts: dict[str, Path],
     dataset: str,
     method: str,
+    round_tag: str,
     ema_checkpoint: Path,
     stage_overwrite: bool,
 ) -> list[str]:
@@ -1327,7 +1235,7 @@ def build_pseudo_command(
         str(args.processed_root),
         "--base_checkpoint",
         str(args.base_checkpoint),
-        "--sac_checkpoint",
+        "--ema_checkpoint",
         str(ema_checkpoint),
         "--datasets",
         dataset,
@@ -1335,26 +1243,26 @@ def build_pseudo_command(
         args.fold,
         "--method",
         method,
+        "--round_tag",
+        round_tag,
         "--device",
         args.device,
         "--max_samples",
         str(args.pseudo_max_samples),
-        "--p_weight",
-        str(args.p_weight),
-        "--qf_weight",
-        str(args.qf_weight),
-        "--p_threshold",
-        str(args.p_threshold),
-        "--q_threshold",
-        str(args.q_threshold),
-        "--fg_q_threshold",
-        str(args.fg_q_threshold),
-        "--shape_threshold",
-        str(args.shape_threshold),
-        "--bg_p_threshold",
-        str(args.bg_p_threshold),
-        "--bg_qf_threshold",
-        str(args.bg_qf_threshold),
+        "--alpha",
+        str(args.alpha),
+        "--beta",
+        str(args.beta),
+        "--gamma",
+        str(args.gamma),
+        "--tau_low",
+        str(args.tau_low),
+        "--tau_high",
+        str(args.tau_high),
+        "--temperature",
+        str(args.temperature),
+        "--top_k",
+        str(args.top_k),
         "--log_every",
         str(args.pseudo_log_every),
     ]
@@ -1370,6 +1278,7 @@ def build_select_command(
     scripts: dict[str, Path],
     dataset: str,
     method: str,
+    round_tag: str,
     round_id: int,
     select_count: int,
     stage_overwrite: bool,
@@ -1385,6 +1294,8 @@ def build_select_command(
         args.fold,
         "--method",
         method,
+        "--round_tag",
+        round_tag,
         "--round_id",
         str(round_id),
         "--select_count",
@@ -1443,7 +1354,7 @@ def load_or_initialize_state(
         "datasets": {},
         "last_error": None,
     }
-    save_json(state, state_path)
+    save_json_atomic(state, state_path)
     return state, state_path
 
 
@@ -1499,7 +1410,7 @@ def update_stage_state(
     )[stage] = stage_state
 
     state["updated_at"] = utc_now()
-    save_json(state, state_path)
+    save_json_atomic(state, state_path)
 
 
 def run_command(
@@ -1761,7 +1672,7 @@ def build_config(
     datasets: list[str],
     dimensions: dict[str, bool],
     schedule: list[int],
-    method_names: list[str],
+    round_tags: list[str],
     scripts: dict[str, Path],
     run_name: str,
 ) -> dict[str, Any]:
@@ -1793,7 +1704,8 @@ def build_config(
         "fold": args.fold,
         "preset": args.preset,
         "schedule": schedule,
-        "method_names": method_names,
+        "method": args.method,
+        "round_tags": round_tags,
         "seed": args.seed,
         "paths": {
             "code_root": str(args.code_root),
@@ -1829,17 +1741,10 @@ def build_config(
             "final_round_runs_selector": False,
         },
         "support": {
-            "k_fg": args.k_fg,
-            "k_bg": args.k_bg,
-            "max_fg_per_image": (
-                args.max_fg_per_image
-            ),
-            "max_bg_per_image": (
-                args.max_bg_per_image
-            ),
-            "max_total_features": (
-                args.max_total_features
-            ),
+            "kmax_shape": args.kmax_shape,
+            "shape_size": args.shape_size,
+            "cluster_max_iter": args.cluster_max_iter,
+            "ring_expand_ratio": args.ring_expand_ratio,
         },
         "training": {
             "epochs": args.epochs,
@@ -1848,52 +1753,20 @@ def build_config(
             "weight_decay": args.weight_decay,
             "ema_decay": args.ema_decay,
             "max_grad_norm": args.max_grad_norm,
-            "lambda_out": args.lambda_out,
-            "lambda_seed": args.lambda_seed,
-            "lambda_wac": args.lambda_wac,
-            "lambda_proto": args.lambda_proto,
-            "lambda_smooth": args.lambda_smooth,
-            "seed_p_threshold": (
-                args.seed_p_threshold
-            ),
-            "seed_qf_threshold": (
-                args.seed_qf_threshold
-            ),
-            "proto_p_low": args.proto_p_low,
-            "proto_p_high": args.proto_p_high,
-            "weak1_low": args.weak1_low,
-            "weak1_high": args.weak1_high,
-            "weak2_low": args.weak2_low,
-            "weak2_high": args.weak2_high,
-            "weak2_weight": args.weak2_weight,
-            "strong_p_threshold": (
-                args.strong_p_threshold
-            ),
-            "strong_qf_threshold": (
-                args.strong_qf_threshold
-            ),
-            "wac_kernel": args.wac_kernel,
+            "log_every": args.train_log_every,
         },
         "pseudo": {
             "max_samples": (
                 args.pseudo_max_samples
             ),
-            "p_weight": args.p_weight,
-            "qf_weight": args.qf_weight,
-            "p_threshold": args.p_threshold,
-            "q_threshold": args.q_threshold,
-            "fg_q_threshold": (
-                args.fg_q_threshold
-            ),
-            "shape_threshold": (
-                args.shape_threshold
-            ),
-            "bg_p_threshold": (
-                args.bg_p_threshold
-            ),
-            "bg_qf_threshold": (
-                args.bg_qf_threshold
-            ),
+            "alpha": args.alpha,
+            "beta": args.beta,
+            "gamma": args.gamma,
+            "tau_low": args.tau_low,
+            "tau_high": args.tau_high,
+            "temperature": args.temperature,
+            "top_k": args.top_k,
+            "log_every": args.pseudo_log_every,
         },
         "execution": {
             "resume": args.resume,
@@ -1922,10 +1795,6 @@ def run_pipeline(
         )
 
     schedule = determine_schedule(args)
-    method_names = build_method_names(
-        args,
-        schedule,
-    )
 
     if args.start_round < 0:
         raise ValueError(
@@ -1975,13 +1844,16 @@ def run_pipeline(
         dimensions,
     )
 
+    is_3d = dimensions[datasets[0]]
+    round_tags = build_round_tags(schedule, is_3d)
+
     run_name = (
         sanitize_name(args.run_name)
         if args.run_name
         else default_run_name(
             datasets,
             schedule,
-            method_names,
+            args.method,
         )
     )
 
@@ -1999,7 +1871,7 @@ def run_pipeline(
         datasets,
         dimensions,
         schedule,
-        method_names,
+        round_tags,
         scripts,
         run_name,
     )
@@ -2018,7 +1890,7 @@ def run_pipeline(
                 "datasets",
                 "fold",
                 "schedule",
-                "method_names",
+                "method",
             )
             mismatches = [
                 key
@@ -2032,7 +1904,7 @@ def run_pipeline(
                     f"{mismatches}"
                 )
 
-    save_json(
+    save_json_atomic(
         config,
         config_path,
     )
@@ -2064,7 +1936,7 @@ def run_pipeline(
     )
     state["updated_at"] = utc_now()
     state["last_error"] = None
-    save_json(state, state_path)
+    save_json_atomic(state, state_path)
 
     stage_overwrite = (
         args.overwrite
@@ -2082,7 +1954,7 @@ def run_pipeline(
                 full_count = schedule[
                     round_id
                 ]
-                method = method_names[
+                round_tag = round_tags[
                     round_id
                 ]
 
@@ -2093,7 +1965,8 @@ def run_pipeline(
                 print(
                     f"[ROUND] dataset={dataset} "
                     f"round={round_id}/{final_round} "
-                    f"method={method} "
+                    f"method={args.method} "
+                    f"round_tag={round_tag} "
                     f"Full units={full_count} "
                     f"dimension={'3D' if is_3d else '2D'}"
                 )
@@ -2104,15 +1977,16 @@ def run_pipeline(
                 previous_selection: Path | None = None
 
                 if round_id > 0:
-                    previous_method = method_names[
+                    previous_round_tag = round_tags[
                         round_id - 1
                     ]
+                    previous_run_id = f"{args.method}_{previous_round_tag}"
                     previous_selection = (
                         selection_snapshot_path(
                             run_dir,
                             dataset,
                             round_id - 1,
-                            previous_method,
+                            previous_run_id,
                         )
                     )
 
@@ -2124,7 +1998,8 @@ def run_pipeline(
                             validate_selection_stage(
                                 args,
                                 dataset,
-                                previous_method,
+                                args.method,
+                                previous_round_tag,
                                 schedule[round_id - 1],
                                 schedule[round_id],
                                 is_3d,
@@ -2143,7 +2018,8 @@ def run_pipeline(
                                 args,
                                 run_dir,
                                 dataset,
-                                previous_method,
+                                args.method,
+                                previous_round_tag,
                                 round_id - 1,
                                 round_id,
                                 schedule[round_id],
@@ -2154,7 +2030,8 @@ def run_pipeline(
                     args,
                     scripts,
                     dataset,
-                    method,
+                    args.method,
+                    round_tag,
                     round_id,
                     full_count,
                     previous_selection,
@@ -2170,15 +2047,16 @@ def run_pipeline(
                     env=env,
                     dataset=dataset,
                     round_id=round_id,
-                    method=method,
+                    method=args.method,
                     full_count=full_count,
                     stage="split",
                     command=split_command,
-                    validator=lambda d=dataset, m=method, f=full_count, dim=is_3d: (
+                    validator=lambda d=dataset, m=args.method, rt=round_tag, f=full_count, dim=is_3d: (
                         validate_split_stage(
                             args,
                             d,
                             m,
+                            rt,
                             f,
                             dim,
                         )
@@ -2191,7 +2069,7 @@ def run_pipeline(
                 ):
                     state["status"] = "stopped_after_split"
                     state["updated_at"] = utc_now()
-                    save_json(state, state_path)
+                    save_json_atomic(state, state_path)
                     return
 
                 template_command = (
@@ -2199,7 +2077,8 @@ def run_pipeline(
                         args,
                         scripts,
                         dataset,
-                        method,
+                        args.method,
+                        round_tag,
                         stage_overwrite,
                     )
                 )
@@ -2213,15 +2092,16 @@ def run_pipeline(
                     env=env,
                     dataset=dataset,
                     round_id=round_id,
-                    method=method,
+                    method=args.method,
                     full_count=full_count,
                     stage="template",
                     command=template_command,
-                    validator=lambda d=dataset, m=method: (
+                    validator=lambda d=dataset, m=args.method, rt=round_tag: (
                         validate_template_stage(
                             args,
                             d,
                             m,
+                            rt,
                         )
                     ),
                 )
@@ -2232,14 +2112,16 @@ def run_pipeline(
                 ):
                     state["status"] = "stopped_after_template"
                     state["updated_at"] = utc_now()
-                    save_json(state, state_path)
+                    save_json_atomic(state, state_path)
                     return
 
                 train_command = build_train_command(
                     args,
                     scripts,
                     dataset,
-                    method,
+                    args.method,
+                    round_tag,
+                    stage_overwrite,
                 )
 
                 execute_or_skip_stage(
@@ -2251,15 +2133,16 @@ def run_pipeline(
                     env=env,
                     dataset=dataset,
                     round_id=round_id,
-                    method=method,
+                    method=args.method,
                     full_count=full_count,
                     stage="train",
                     command=train_command,
-                    validator=lambda d=dataset, m=method: (
+                    validator=lambda d=dataset, m=args.method, rt=round_tag: (
                         validate_train_stage(
                             args,
                             d,
                             m,
+                            rt,
                         )
                     ),
                 )
@@ -2270,13 +2153,14 @@ def run_pipeline(
                 ):
                     state["status"] = "stopped_after_train"
                     state["updated_at"] = utc_now()
-                    save_json(state, state_path)
+                    save_json_atomic(state, state_path)
                     return
 
                 paths = round_output_paths(
                     args,
                     dataset,
-                    method,
+                    args.method,
+                    round_tag,
                 )
                 ema_checkpoint = paths[
                     "train_ema"
@@ -2287,7 +2171,8 @@ def run_pipeline(
                         args,
                         scripts,
                         dataset,
-                        method,
+                        args.method,
+                        round_tag,
                         ema_checkpoint,
                         stage_overwrite,
                     )
@@ -2302,15 +2187,16 @@ def run_pipeline(
                     env=env,
                     dataset=dataset,
                     round_id=round_id,
-                    method=method,
+                    method=args.method,
                     full_count=full_count,
                     stage="pseudo",
                     command=pseudo_command,
-                    validator=lambda d=dataset, m=method: (
+                    validator=lambda d=dataset, m=args.method, rt=round_tag: (
                         validate_pseudo_stage(
                             args,
                             d,
                             m,
+                            rt,
                         )
                     ),
                 )
@@ -2321,24 +2207,36 @@ def run_pipeline(
                 ):
                     state["status"] = "stopped_after_pseudo"
                     state["updated_at"] = utc_now()
-                    save_json(state, state_path)
+                    save_json_atomic(state, state_path)
                     return
 
-                if round_id < final_round:
-                    next_full_count = schedule[
+                if not is_formal_final_round(round_id, is_3d):
+                    next_full_count = _formal_schedule(is_3d)[
                         round_id + 1
                     ]
+                    default_select = 1 if is_3d else 5
                     select_count = (
-                        next_full_count
-                        - full_count
+                        args.select_count
+                        if args.select_count is not None
+                        else default_select
                     )
+                    schedule_diff = next_full_count - full_count
+                    if select_count != schedule_diff:
+                        raise ValueError(
+                            f"select_count mismatch: "
+                            f"select_count={select_count}, "
+                            f"schedule_diff={schedule_diff} "
+                            f"(next={next_full_count} - "
+                            f"current={full_count})"
+                        )
 
                     select_command = (
                         build_select_command(
                             args,
                             scripts,
                             dataset,
-                            method,
+                            args.method,
+                            round_tag,
                             round_id,
                             select_count,
                             stage_overwrite,
@@ -2354,15 +2252,16 @@ def run_pipeline(
                         env=env,
                         dataset=dataset,
                         round_id=round_id,
-                        method=method,
+                        method=args.method,
                         full_count=full_count,
                         stage="select",
                         command=select_command,
-                        validator=lambda d=dataset, m=method, p=full_count, n=next_full_count, dim=is_3d: (
+                        validator=lambda d=dataset, m=args.method, rt=round_tag, p=full_count, n=next_full_count, dim=is_3d: (
                             validate_selection_stage(
                                 args,
                                 d,
                                 m,
+                                rt,
                                 p,
                                 n,
                                 dim,
@@ -2376,7 +2275,8 @@ def run_pipeline(
                                 args,
                                 run_dir,
                                 dataset,
-                                method,
+                                args.method,
+                                round_tag,
                                 round_id,
                                 round_id + 1,
                                 next_full_count,
@@ -2393,7 +2293,7 @@ def run_pipeline(
                     ):
                         state["status"] = "stopped_after_select"
                         state["updated_at"] = utc_now()
-                        save_json(state, state_path)
+                        save_json_atomic(state, state_path)
                         return
                 else:
                     update_stage_state(
@@ -2401,7 +2301,7 @@ def run_pipeline(
                         state_path,
                         dataset,
                         round_id,
-                        method,
+                        args.method,
                         full_count,
                         "select",
                         "not_required_final_round",
@@ -2412,10 +2312,35 @@ def run_pipeline(
                         ),
                     )
 
+                # Write round summary
+                is_final_round = is_formal_final_round(round_id, is_3d)
+                round_paths = round_output_paths(
+                    args, dataset, args.method, round_tag,
+                )
+                round_summary = {
+                    "dataset": dataset,
+                    "fold": args.fold,
+                    "method": args.method,
+                    "round_id": round_id,
+                    "round_tag": round_tag,
+                    "full_count": full_count,
+                    "is_final_round": is_final_round,
+                    "select_required": not is_final_round,
+                    "select_status": (
+                        "not_required"
+                        if is_final_round
+                        else "completed"
+                    ),
+                    "completed_at": utc_now(),
+                }
+                save_json_atomic(
+                    round_summary, round_paths["round_summary"],
+                )
+
                 if args.stop_after == "round":
                     state["status"] = "stopped_after_round"
                     state["updated_at"] = utc_now()
-                    save_json(state, state_path)
+                    save_json_atomic(state, state_path)
                     return
 
         state["status"] = (
@@ -2425,7 +2350,7 @@ def run_pipeline(
         )
         state["updated_at"] = utc_now()
         state["completed_at"] = utc_now()
-        save_json(state, state_path)
+        save_json_atomic(state, state_path)
 
         print("\n" + "=" * 88)
         print(
@@ -2443,7 +2368,7 @@ def run_pipeline(
         state["status"] = "interrupted"
         state["updated_at"] = utc_now()
         state["last_error"] = "KeyboardInterrupt"
-        save_json(state, state_path)
+        save_json_atomic(state, state_path)
         print("\n[INTERRUPTED] state saved for --resume")
         raise
     except Exception as exc:
@@ -2454,7 +2379,7 @@ def run_pipeline(
             "message": str(exc),
             "traceback": traceback.format_exc(),
         }
-        save_json(state, state_path)
+        save_json_atomic(state, state_path)
         raise
 
 
@@ -2500,91 +2425,6 @@ def add_training_arguments(
         default=1.0,
     )
     group.add_argument(
-        "--lambda_out",
-        type=float,
-        default=1.0,
-    )
-    group.add_argument(
-        "--lambda_seed",
-        type=float,
-        default=0.5,
-    )
-    group.add_argument(
-        "--lambda_wac",
-        type=float,
-        default=0.5,
-    )
-    group.add_argument(
-        "--lambda_proto",
-        type=float,
-        default=0.1,
-    )
-    group.add_argument(
-        "--lambda_smooth",
-        type=float,
-        default=0.03,
-    )
-    group.add_argument(
-        "--seed_p_threshold",
-        type=float,
-        default=0.65,
-    )
-    group.add_argument(
-        "--seed_qf_threshold",
-        type=float,
-        default=0.55,
-    )
-    group.add_argument(
-        "--proto_p_low",
-        type=float,
-        default=0.15,
-    )
-    group.add_argument(
-        "--proto_p_high",
-        type=float,
-        default=0.85,
-    )
-    group.add_argument(
-        "--weak1_low",
-        type=float,
-        default=0.30,
-    )
-    group.add_argument(
-        "--weak1_high",
-        type=float,
-        default=0.40,
-    )
-    group.add_argument(
-        "--weak2_low",
-        type=float,
-        default=0.40,
-    )
-    group.add_argument(
-        "--weak2_high",
-        type=float,
-        default=0.50,
-    )
-    group.add_argument(
-        "--weak2_weight",
-        type=float,
-        default=0.5,
-    )
-    group.add_argument(
-        "--strong_p_threshold",
-        type=float,
-        default=0.50,
-    )
-    group.add_argument(
-        "--strong_qf_threshold",
-        type=float,
-        default=0.55,
-    )
-    group.add_argument(
-        "--wac_kernel",
-        type=int,
-        default=31,
-    )
-    group.add_argument(
         "--train_log_every",
         type=int,
         default=10,
@@ -2599,29 +2439,24 @@ def add_support_arguments(
     )
 
     group.add_argument(
-        "--k_fg",
-        type=int,
-        default=3,
-    )
-    group.add_argument(
-        "--k_bg",
+        "--kmax_shape",
         type=int,
         default=5,
     )
     group.add_argument(
-        "--max_fg_per_image",
+        "--shape_size",
         type=int,
-        default=512,
+        default=64,
     )
     group.add_argument(
-        "--max_bg_per_image",
+        "--cluster_max_iter",
         type=int,
-        default=512,
+        default=25,
     )
     group.add_argument(
-        "--max_total_features",
+        "--ring_expand_ratio",
         type=int,
-        default=200000,
+        default=5,
     )
 
 
@@ -2642,44 +2477,46 @@ def add_pseudo_arguments(
         ),
     )
     group.add_argument(
-        "--p_weight",
+        "--alpha",
         type=float,
-        default=0.65,
+        default=0.70,
+        help="Weight for P (prediction probability).",
     )
     group.add_argument(
-        "--qf_weight",
-        type=float,
-        default=0.35,
-    )
-    group.add_argument(
-        "--p_threshold",
-        type=float,
-        default=0.50,
-    )
-    group.add_argument(
-        "--q_threshold",
-        type=float,
-        default=0.58,
-    )
-    group.add_argument(
-        "--fg_q_threshold",
-        type=float,
-        default=0.45,
-    )
-    group.add_argument(
-        "--shape_threshold",
+        "--beta",
         type=float,
         default=0.10,
+        help="Weight for A (adaptive shape prior).",
     )
     group.add_argument(
-        "--bg_p_threshold",
+        "--gamma",
         type=float,
-        default=0.15,
+        default=0.20,
+        help="Weight for QF (feature bank query).",
     )
     group.add_argument(
-        "--bg_qf_threshold",
+        "--tau_low",
         type=float,
-        default=0.25,
+        default=0.30,
+        help="Score <= tau_low → background (0).",
+    )
+    group.add_argument(
+        "--tau_high",
+        type=float,
+        default=0.70,
+        help="Score >= tau_high → foreground (label_id).",
+    )
+    group.add_argument(
+        "--temperature",
+        type=float,
+        default=0.07,
+        help="Temperature for bank similarity softmax.",
+    )
+    group.add_argument(
+        "--top_k",
+        type=int,
+        default=10,
+        help="Top-K nearest bank neighbours for QF score.",
     )
     group.add_argument(
         "--pseudo_log_every",
@@ -2722,7 +2559,6 @@ def build_parser() -> argparse.ArgumentParser:
         "--preset",
         choices=(
             "custom",
-            "smoke_2d",
             "formal_2d",
             "formal_3d",
         ),
@@ -2738,29 +2574,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     parser.add_argument(
-        "--method_prefix",
-        default="idea1_iter_gt_iou_s2026",
-        help=(
-            "Automatic method names become "
-            "<prefix>_r<round>_full<count>."
-        ),
-    )
-    parser.add_argument(
-        "--method_suffix",
-        default="",
-        help=(
-            "Optional suffix appended to every "
-            "automatically generated method."
-        ),
-    )
-    parser.add_argument(
-        "--method_names",
-        default="",
-        help=(
-            "Optional exact comma-separated method names, "
-            "one for each schedule entry. This is useful "
-            "when resuming manually created rounds."
-        ),
+        "--method",
+        default=METHOD_DEFAULT,
+        help="Method identifier (default: %(default)s)",
     )
     parser.add_argument(
         "--run_name",
@@ -2877,6 +2693,17 @@ def build_parser() -> argparse.ArgumentParser:
     add_training_arguments(parser)
     add_pseudo_arguments(parser)
 
+    select_group = parser.add_argument_group("hard-sample selection")
+    select_group.add_argument(
+        "--select_count",
+        type=int,
+        default=None,
+        help=(
+            "Number of hard samples to select per non-final round. "
+            "Default: 5 for 2D, 1 for 3D datasets."
+        ),
+    )
+
     return parser
 
 
@@ -2885,12 +2712,11 @@ def validate_numeric_args(
 ) -> None:
     positive_ints = (
         "epochs",
-        "k_fg",
-        "k_bg",
-        "max_fg_per_image",
-        "max_bg_per_image",
-        "max_total_features",
-        "wac_kernel",
+        "kmax_shape",
+        "shape_size",
+        "cluster_max_iter",
+        "ring_expand_ratio",
+        "top_k",
         "train_log_every",
         "pseudo_log_every",
     )
@@ -2912,11 +2738,6 @@ def validate_numeric_args(
             raise ValueError(
                 f"--{name} must be >= 0, got {value}"
             )
-
-    if args.wac_kernel % 2 == 0:
-        raise ValueError(
-            "--wac_kernel must be odd"
-        )
 
     if args.pseudo_max_samples > 0:
         raise ValueError(
