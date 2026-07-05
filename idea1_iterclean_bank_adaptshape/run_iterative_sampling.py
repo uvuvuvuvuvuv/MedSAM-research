@@ -1158,8 +1158,10 @@ def build_template_command(
         str(args.shape_size),
         "--cluster_max_iter",
         str(args.cluster_max_iter),
-        "--ring_expand_ratio",
-        str(args.ring_expand_ratio),
+        "--bg_ring_width_tokens",
+        str(args.bg_ring_width_tokens),
+        "--max_global_non_bg_coverage",
+        str(args.max_global_non_bg_coverage),
     ]
 
     if stage_overwrite:
@@ -1744,7 +1746,8 @@ def build_config(
             "kmax_shape": args.kmax_shape,
             "shape_size": args.shape_size,
             "cluster_max_iter": args.cluster_max_iter,
-            "ring_expand_ratio": args.ring_expand_ratio,
+            "bg_ring_width_tokens": args.bg_ring_width_tokens,
+            "max_global_non_bg_coverage": args.max_global_non_bg_coverage,
         },
         "training": {
             "epochs": args.epochs,
@@ -2456,9 +2459,14 @@ def add_support_arguments(
         default=25,
     )
     group.add_argument(
-        "--ring_expand_ratio",
+        "--bg_ring_width_tokens",
         type=int,
-        default=5,
+        default=1,
+    )
+    group.add_argument(
+        "--max_global_non_bg_coverage",
+        type=float,
+        default=0.10,
     )
 
 
@@ -2717,7 +2725,6 @@ def validate_numeric_args(
         "kmax_shape",
         "shape_size",
         "cluster_max_iter",
-        "ring_expand_ratio",
         "top_k",
         "train_log_every",
         "pseudo_log_every",
@@ -2733,6 +2740,7 @@ def validate_numeric_args(
         "max_steps",
         "pseudo_max_samples",
         "seed",
+        "bg_ring_width_tokens",
     )
     for name in nonnegative_ints:
         value = int(getattr(args, name))

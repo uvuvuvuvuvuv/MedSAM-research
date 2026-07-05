@@ -269,16 +269,36 @@ def resize_mask_nearest(
     ).astype(np.int64)
 
 
-def resize_float(
+def resize_binary_mask_to_coverage_area(
     mask: np.ndarray,
     size_hw: tuple[int, int],
 ) -> np.ndarray:
+    """Downsample a binary mask to a coverage map via area averaging.
+
+    Each output value is the fraction of the corresponding input region
+    where *mask* is non-zero, i.e. the area coverage in [0, 1].
+    """
     height, width = size_hw
 
     return cv2.resize(
         mask.astype(np.float32),
         (width, height),
-        interpolation=cv2.INTER_LINEAR,
+        interpolation=cv2.INTER_AREA,
+    ).astype(np.float32)
+
+
+def resize_binary_shape_nearest(
+    mask: np.ndarray,
+    size_hw: tuple[int, int],
+) -> np.ndarray:
+    """Resize a binary shape crop with nearest-neighbour to preserve
+    hard 0/1 boundaries (not area-averaged)."""
+    height, width = size_hw
+
+    return cv2.resize(
+        mask.astype(np.uint8),
+        (width, height),
+        interpolation=cv2.INTER_NEAREST,
     ).astype(np.float32)
 
 
@@ -430,13 +450,20 @@ def _compute_ring_mask(
     bbox_teacher: list[float],
     gt_h: int,
     gt_w: int,
-    ring_width: int,
+    ring_width_tokens: int,
 ) -> np.ndarray:
     """Build a boolean ring mask in feature-map coordinates.
 
     The ring is the region *outside* the instance bounding box but *inside*
-    the same bbox expanded by *ring_width* (in teacher-space pixels).
+    the same bbox expanded by *ring_width_tokens* feature-map tokens.
+    The original tight bbox interior is never modified.
+
+    ring_width_tokens == 0 produces an all-False mask (ring disabled).
     """
+    ring_f = int(ring_width_tokens)
+    if ring_f <= 0:
+        return np.zeros((feature_h, feature_w), dtype=bool)
+
     scale_h = feature_h / gt_h
     scale_w = feature_w / gt_w
 
@@ -449,7 +476,6 @@ def _compute_ring_mask(
     iy2 = min(feature_h, int(np.ceil(y2 * scale_h)))
 
     # Expanded bbox (ring outer boundary).
-    ring_f = max(1, int(np.ceil(ring_width * max(scale_h, scale_w))))
     ex1 = max(0, ix1 - ring_f)
     ey1 = max(0, iy1 - ring_f)
     ex2 = min(feature_w, ix2 + ring_f)
@@ -735,6 +761,15 @@ def process_dataset(
     empty_target_count = 0
     skipped_or_invalid_count = 0
     total_instance_count = 0
+    zero_bg_instance_count = 0
+    instances_with_bg_tokens = 0
+    instances_without_bg_tokens = 0
+    total_bg_ring_candidate_tokens = 0
+    total_valid_global_bg_tokens = 0
+    global_non_bg_coverage_ring_sum = 0.0
+    global_non_bg_coverage_ring_count = 0
+    global_non_bg_coverage_ring_min: float | None = None
+    global_non_bg_coverage_ring_max: float | None = None
     processed_full_slice_names: list[str] = []
     feature_dim: int | None = None
     feature_map_hw: tuple[int, int] | None = None
@@ -839,6 +874,21 @@ def process_dataset(
             "instances": [],
         }
 
+        # Global non-background coverage (computed once per image).
+        # Everything that is not 0 is treated as non-reliable-background:
+        #   - current instance foreground
+        #   - other instances (same or different class)
+        #   - foreground classes not in class_ids
+        #   - ignore label 255
+        global_non_bg_mask = (gt != 0)
+        global_non_bg_coverage = resize_binary_mask_to_coverage_area(
+            global_non_bg_mask.astype(np.float32),
+            (feature_h, feature_w),
+        )
+        valid_global_bg_mask = (
+            global_non_bg_coverage <= args.max_global_non_bg_coverage
+        )
+
         # ---- process each instance ----
         for inst in instances:
             label_id = int(inst["label_id"])
@@ -877,23 +927,40 @@ def process_dataset(
                     f"slice={slice_name}"
                 )
 
-            # Coverage in feature space (bilinear for continuous values).
-            inst_coverage = resize_float(
+            # Coverage in feature space (area-averaged).
+            inst_coverage = resize_binary_mask_to_coverage_area(
                 inst_mask.astype(np.float32),
                 (feature_h, feature_w),
             )
 
             # Token classification.
+            # Foreground: instance-level coverage (unchanged).
             fg_mask = inst_coverage >= args.fg_coverage_threshold
-            bg_mask = inst_coverage <= args.bg_coverage_threshold
 
-            # Background ring.
+            # Background ring (feature-token units, does not modify bbox).
             ring_mask = _compute_ring_mask(
                 feature_h, feature_w,
                 bbox, gt_h, gt_w,
-                args.ring_expand_ratio,
+                args.bg_ring_width_tokens,
             )
-            final_bg_mask = bg_mask & ring_mask
+
+            # Reliable background = ring AND global non-bg coverage <= max.
+            final_bg_mask = valid_global_bg_mask & ring_mask
+
+            # Ring-level global-non-bg-coverage statistics.
+            ring_indices = np.where(ring_mask)
+            ring_count = int(ring_indices[0].size)
+            total_bg_ring_candidate_tokens += ring_count
+            if ring_count > 0:
+                ring_coverage_values = global_non_bg_coverage[ring_indices]
+                global_non_bg_coverage_ring_sum += float(ring_coverage_values.sum())
+                global_non_bg_coverage_ring_count += ring_count
+                cmin = float(ring_coverage_values.min())
+                cmax = float(ring_coverage_values.max())
+                if global_non_bg_coverage_ring_min is None or cmin < global_non_bg_coverage_ring_min:
+                    global_non_bg_coverage_ring_min = cmin
+                if global_non_bg_coverage_ring_max is None or cmax > global_non_bg_coverage_ring_max:
+                    global_non_bg_coverage_ring_max = cmax
 
             # Sample tokens.
             fg_indices = np.where(fg_mask)
@@ -904,6 +971,7 @@ def process_dataset(
 
             fg_available = int(fg_tokens.shape[0])
             bg_available = int(bg_tokens.shape[0])
+            total_valid_global_bg_tokens += bg_available
 
             if fg_available == 0:
                 raise RuntimeError(
@@ -914,9 +982,15 @@ def process_dataset(
             sampled_fg = sample_rows(
                 fg_tokens, args.max_fg_per_instance, rng
             )
-            sampled_bg = sample_rows(
-                bg_tokens, args.max_bg_per_instance, rng
-            ) if bg_available > 0 else np.zeros((0, feature_dim), dtype=np.float32)
+            if bg_available > 0:
+                sampled_bg = sample_rows(
+                    bg_tokens, args.max_bg_per_instance, rng
+                )
+                instances_with_bg_tokens += 1
+            else:
+                sampled_bg = np.zeros((0, feature_dim), dtype=np.float32)
+                zero_bg_instance_count += 1
+                instances_without_bg_tokens += 1
 
             fg_sampled = int(sampled_fg.shape[0])
             bg_sampled = int(sampled_bg.shape[0])
@@ -938,7 +1012,7 @@ def process_dataset(
                 sx1, sy1, sx2, sy2 = shape_bbox
                 shape_crop = inst_mask[sy1:sy2, sx1:sx2].astype(np.float32)
                 shape64 = np.clip(
-                    resize_float(shape_crop, (args.shape_size, args.shape_size)),
+                    resize_binary_shape_nearest(shape_crop, (args.shape_size, args.shape_size)),
                     0.0, 1.0,
                 )
                 shape_list[label_id].append(shape64.astype(np.float32))
@@ -1063,10 +1137,35 @@ def process_dataset(
         ),
         "skipped_or_invalid_count": skipped_or_invalid_count,
         "num_empty_targets": empty_target_count,
+        "zero_bg_instance_count": zero_bg_instance_count,
+        "instances_with_bg_tokens": instances_with_bg_tokens,
+        "instances_without_bg_tokens": instances_without_bg_tokens,
         "class_ids": class_ids,
         "fg_coverage_threshold": args.fg_coverage_threshold,
-        "bg_coverage_threshold": args.bg_coverage_threshold,
-        "ring_expand_ratio": args.ring_expand_ratio,
+        "max_global_non_bg_coverage": args.max_global_non_bg_coverage,
+        "bg_ring_width_tokens": args.bg_ring_width_tokens,
+        "total_bg_ring_candidate_tokens": total_bg_ring_candidate_tokens,
+        "total_valid_global_bg_tokens": total_valid_global_bg_tokens,
+        "bg_ring_valid_ratio": (
+            total_valid_global_bg_tokens
+            / max(total_bg_ring_candidate_tokens, 1)
+        ),
+        "global_non_bg_coverage_ring_min": (
+            float(global_non_bg_coverage_ring_min)
+            if global_non_bg_coverage_ring_min is not None
+            else None
+        ),
+        "global_non_bg_coverage_ring_mean": (
+            float(global_non_bg_coverage_ring_sum
+                  / max(global_non_bg_coverage_ring_count, 1))
+            if global_non_bg_coverage_ring_count > 0
+            else None
+        ),
+        "global_non_bg_coverage_ring_max": (
+            float(global_non_bg_coverage_ring_max)
+            if global_non_bg_coverage_ring_max is not None
+            else None
+        ),
         "max_fg_per_instance": args.max_fg_per_instance,
         "max_bg_per_instance": args.max_bg_per_instance,
         "max_fg_per_class": args.max_fg_per_class,
@@ -1106,7 +1205,11 @@ def process_dataset(
             bg_all = np.concatenate(bg_parts, axis=0).astype(np.float32)
             bg_bank = sample_rows(bg_all, args.max_bg_per_class, rng)
         else:
-            bg_bank = np.zeros((0, feature_dim), dtype=np.float32)
+            raise RuntimeError(
+                f"Empty background bank for class {class_id} in "
+                f"{dataset}/{args.fold}, round_tag={round_tag}. "
+                f"No reliable global-background tokens were collected."
+            )
 
         # --- Shape clustering ---
         shapes = shape_list.get(class_id, [])
@@ -1310,10 +1413,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="Minimum coverage for foreground tokens.",
     )
     bank_group.add_argument(
-        "--bg_coverage_threshold",
+        "--max_global_non_bg_coverage",
         type=float,
         default=0.10,
-        help="Maximum coverage for background tokens.",
+        help=(
+            "Maximum allowed global non-background area fraction "
+            "for a reliable background token. "
+            "0.10 means at most 10%% of the feature-token region "
+            "may be occupied by any foreground (any class/instance) "
+            "or ignore (255) pixels."
+        ),
     )
     bank_group.add_argument(
         "--max_fg_per_instance",
@@ -1340,10 +1449,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="Max background tokens in bank per class.",
     )
     bank_group.add_argument(
-        "--ring_expand_ratio",
+        "--bg_ring_width_tokens",
         type=int,
-        default=5,
-        help="Background ring expand ratio in teacher-space pixels.",
+        default=1,
+        help=(
+            "Width of the exterior local-background ring in "
+            "feature-map tokens. This does not modify the "
+            "original tight box prompt. 0 disables the ring."
+        ),
     )
 
     # Shape clustering parameters.
@@ -1379,7 +1492,6 @@ def validate_args(args: argparse.Namespace) -> None:
         "max_bg_per_instance",
         "max_fg_per_class",
         "max_bg_per_class",
-        "ring_expand_ratio",
         "shape_size",
         "kmax_shape",
         "cluster_max_iter",
@@ -1388,15 +1500,21 @@ def validate_args(args: argparse.Namespace) -> None:
         if value <= 0:
             raise ValueError(f"--{name} must be positive, got {value}")
 
+    if args.bg_ring_width_tokens < 0:
+        raise ValueError(
+            f"--bg_ring_width_tokens must be >= 0, "
+            f"got {args.bg_ring_width_tokens}"
+        )
+
     if not (0.0 <= args.fg_coverage_threshold <= 1.0):
         raise ValueError(
             f"--fg_coverage_threshold must be in [0, 1], "
             f"got {args.fg_coverage_threshold}"
         )
-    if not (0.0 <= args.bg_coverage_threshold <= 1.0):
+    if not (0.0 <= args.max_global_non_bg_coverage <= 1.0):
         raise ValueError(
-            f"--bg_coverage_threshold must be in [0, 1], "
-            f"got {args.bg_coverage_threshold}"
+            f"--max_global_non_bg_coverage must be in [0, 1], "
+            f"got {args.max_global_non_bg_coverage}"
         )
 
 
