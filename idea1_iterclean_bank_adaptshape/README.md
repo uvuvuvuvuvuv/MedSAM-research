@@ -1,72 +1,118 @@
-# SAC-MedSAM Final — Clean Mainline
+# idea1_iterclean_bank_adaptshape
 
-This directory contains the cleaned **Default SAC** mainline. Experimental branches that are not enabled in the reported default run are intentionally excluded from the core scripts.
+Iterative sampling pipeline for MedSAM fine-tuning with Feature Bank and Adaptive Multi-Shape templates.
 
-## Main scripts
+## Pipeline Stages (per round)
 
-1. `01_build_full_box_split.py`
-   - Default: `full_ratio=0.10`, `seed=2026`.
-   - 2D datasets are split by image.
-   - ACDC, Prostate158, BTCV and Synapse are split by case.
+| Stage | Script | Description |
+|-------|--------|-------------|
+| Split | `01_build_full_box_split.py` | Random (round 0) or external-selection (round 1+) Full/Box split |
+| Template | `02_build_support_template.py` | Feature bank extraction + adaptive shape clustering |
+| Train | `03_train_medsam_sac.py` | Mask-decoder-only fine-tuning with EMA |
+| Pseudo | `04_generate_pseudo_sac.py` | Tri-value pseudo-label generation with bank quality scores |
+| Select | `05_select_hard_by_gt_iou.py` | GT-IoU-based hard sample selection for next round |
 
-2. `02_build_support_template.py`
-   - Reads **full samples only**.
-   - Extracts normalized MedSAM image-encoder features.
-   - Builds `k_fg=3` foreground prototypes and `k_bg=5` background prototypes per class.
-   - Builds only `shape_A`; the redundant `shape_R` field has been removed.
+## Key Design Decisions
 
-3. `03_train_medsam_sac.py`
-   - Freezes the image encoder and prompt encoder.
-   - Trains the mask decoder only.
-   - Full loss: `Dice + BCE`.
-   - Box loss: `out + seed + WAC + prototype + TV smooth`.
-   - Box samples do not load GT at code level.
-   - Disabled FAS logic and all related arguments/log columns have been removed.
+### Feature Bank (02)
+- Frozen Image Encoder from MedSAM ViT-B checkpoint
+- Instance-level GT matching: component_id priority, bbox-IoU fallback
+- Coverage-based FG/BG token classification (fg >= 0.90, bg <= 0.10)
+- L2-normalized features; ring-based background sampling
+- 3D per-case balanced sampling
 
-4. `04_generate_pseudo_sac.py`
-   - Full samples load GT and retain exact supervision.
-   - Box samples do not load `teacher_gt`, `native_gt` or `student_gt`.
-   - Generates both teacher-space and student-space tri-state labels.
-   - Uses `q_threshold` from the command line instead of a hard-coded `0.58`.
-   - Geometry mapping supports offsets and uses nearest-neighbor interpolation for labels.
-   - Generation statistics do not include GT-based evaluation metrics. The legacy filename `pseudo_quality_stats_<method>.csv` is retained so the existing visualization script remains compatible.
+### Adaptive Multi-Shape Clustering (02)
+- Spherical k-means on flattened 64x64 shape masks
+- Automatic K selection via support-unit count constraints (min_support=2)
 
-5. `05_visualize_pseudo_sac.py`
-   - Keep the currently validated visualization script in the project directory.
-   - It is not replaced by this package.
+### Training (03)
+- Mask decoder only; Image/Prompt encoders frozen
+- EMA for stable inference; Dice + BCEWithLogitsLoss
+- Full-mode records only
 
-6. `06_compare_pseudo_quality.py`
-   - Supports binary and multi-class datasets in one script.
-   - Computes strict micro and macro metrics.
-   - Uses the correct metric direction when counting SAC improvements.
-   - Exports sample-level, paired-delta and per-class CSV files.
+### Pseudo-Label Fusion (04)
+- Score = alpha * P + beta * A + gamma * QF
+- Top-K bank query with temperature scaling for QF
+- Tri-value output: FG (>= tau_high), BG (<= tau_low), unknown (255)
 
-## Removed from the formal mainline
+### Hard Sample Selection (05)
+- GT-IoU scoring; 2D per-slice, 3D per-case aggregation (worst20_mean)
+- Test data never participates
 
-- FAS parameters, loss, gates and logs (`lambda_fas=0` in the previous default run).
-- `shape_R`, because it is exactly recoverable from `shape_A` and was not consumed.
-- GT loading for box training and box pseudo-label generation.
-- Full-subset metrics inside the generation script.
-- Duplicate teacher-to-student remap in the standard path.
+## Shared Modules
 
-`07_remap_sac_teacher_to_student.py` remains useful only as a recovery utility when teacher pseudo-labels already exist and student pseudo-labels need to be regenerated without running MedSAM again.
+- `pipeline_common.py` — path construction, atomic JSON, Git checks, stage markers
+- `instance_utils.py` — instance-level GT matching (connected-components, bbox IoU)
 
-## Installation
+## NPZ Support File Contract
 
+Global keys: `class_ids`, `feature_dim`, `shape_size`, `method`, `round_tag`, `run_id`
+
+Per-class keys (for each class_id `c`): `bank_fg_c{c}`, `bank_bg_c{c}`, `shape_templates_c{c}`, `shape_semantic_centers_c{c}`, `shape_cluster_instance_counts_c{c}`, `shape_cluster_support_counts_c{c}`
+
+All arrays loadable with `allow_pickle=False`. Forbidden old keys: `proto_fg_c*`, `proto_bg_c*`, `shape_A_c*`, `shape_R_c*`.
+
+## Directory Contract
+
+- **Source**: `idea1_iterclean_bank_adaptshape/`
+- **Frozen baseline** (read-only): `/storage/baiyuting/data/MedSAM-main/data/processed/`
+- **Writable root**: `/storage/baiyuting/data/out_data_idea1/`
+- **Processed outputs**: `<writable_root>/MedSAM-main/data/processed/<dataset>/fold_0/`
+- **Training outputs**: `<writable_root>/MedSAM-main/work_dir/MedSAM_ft/`
+
+## Usage
+
+### Runner (recommended)
 ```bash
-bash install_clean_sac_scripts.sh \
-  /storage/baiyuting/data/MedSAM-main/idea1_sac_medsam_final
+python run_iterative_sampling.py \
+    --preset smoke_2d \
+    --datasets cvc_clinicdb \
+    --method idea1_iterclean_bank_adaptshape \
+    --run_name my_run
 ```
 
-The installer creates timestamped backups, archives experimental/backup scripts, installs the cleaned files and runs `py_compile`.
+### Individual stage
+```bash
+# Build support template
+python 02_build_support_template.py \
+    --processed_root <path> --checkpoint <path> \
+    --datasets cvc_clinicdb --method <method> --round_tag r00_full5
 
-## Important reproducibility note
+# Train mask decoder
+python 03_train_medsam_sac.py \
+    --processed_root <path> --checkpoint <path> \
+    --datasets cvc_clinicdb --method <method> --out_root <path>
 
-The cleaned scripts preserve the previous Default SAC numerical logic for the default configuration, except for code-audit corrections that were previously ineffective or redundant:
+# Generate pseudo-labels
+python 04_generate_pseudo_sac.py \
+    --processed_root <path> --base_checkpoint <path> --ema_checkpoint <path> \
+    --datasets cvc_clinicdb --method <method> --round_tag r00_full5 \
+    --alpha 0.5 --beta 0.3 --gamma 0.2 --tau_low 0.1 --tau_high 0.5
 
-- `q_threshold` now actually controls the `Q` threshold; its default remains `0.58`.
-- Box GT is no longer loaded, but it was not used in the previous box loss.
-- FAS was removed because its default weight was `0.0`.
-- `shape_R` was removed because it was unused.
+# Select hard samples
+python 05_select_hard_by_gt_iou.py \
+    --processed_root <path> --datasets cvc_clinicdb \
+    --method <method> --round_tag r00_full5 --round_id 0 --select_count 5
+```
 
-Changing thresholds, loss weights, geometry offsets, split records or checkpoints will change generated results.
+### Validate round outputs
+```bash
+python 08_validate_round_outputs.py \
+    --processed_root <path> --dataset cvc_clinicdb \
+    --method <method> --round_tag r00_full5 --strict
+```
+
+## Testing
+```bash
+PYTHONPATH=/storage/baiyuting/data/MedSAM-main \
+    python -m unittest discover -s idea1_iterclean_bank_adaptshape/tests -p "test_*.py" -v
+```
+
+## Schedule Presets
+
+| Preset | Round counts | Use case |
+|--------|-------------|----------|
+| `smoke_2d` | [5, 7] | 2D quick smoke test |
+| `formal_2d` | [5, 10, 15, 20] | 2D full run |
+| `formal_3d` | [1, 2, 3, 4, 5] | 3D per-case run |
+| `custom` | user-specified | Custom schedule via --schedule |
