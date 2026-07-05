@@ -17,7 +17,17 @@ Iterative sampling pipeline for MedSAM fine-tuning with Feature Bank and Adaptiv
 ### Feature Bank (02)
 - Frozen Image Encoder from MedSAM ViT-B checkpoint
 - Instance-level GT matching: component_id priority, bbox-IoU fallback
-- Coverage-based FG/BG token classification (fg >= 0.90, bg <= 0.10)
+- FG token: per-instance area coverage >= 0.90 (area-averaged, not bilinear)
+- BG token: ring region around original tight bbox AND global non-background
+  coverage <= 0.10. The global non-background mask includes ALL foreground
+  classes, ALL instances, and ignore (255) pixels. Only gt == 0 is
+  considered reliable background.
+- The original tight bbox is NEVER modified — the background ring is
+  purely an exterior mask used only for Feature Bank sampling, never
+  for MedSAM box prompts, shape crops, pseudo-label spatial constraints,
+  or GT instance matching.
+- Default bg_ring_width_tokens = 1 feature-map token (0 disables).
+- Shape crop resize uses nearest-neighbor (preserves hard 0/1 boundaries).
 - L2-normalized features; ring-based background sampling
 - 3D per-case balanced sampling
 

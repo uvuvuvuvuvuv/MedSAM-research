@@ -40,12 +40,12 @@ Round 1: External Split from Selection → [Bank + Shapes]  → Train Decoder �
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | fg_coverage_threshold | 0.90 | Min coverage for FG token |
-| bg_coverage_threshold | 0.10 | Max coverage for BG token |
 | max_fg_per_instance | 128 | Max FG tokens per instance |
 | max_bg_per_instance | 128 | Max BG tokens per instance |
 | max_fg_per_class | 4096 | Max FG tokens per class |
 | max_bg_per_class | 4096 | Max BG tokens per class |
-| ring_expand_ratio | 5 | Ring width factor for BG sampling |
+| bg_ring_width_tokens | 1 | Background ring width in feature-map tokens (0=disabled) |
+| max_global_non_bg_coverage | 0.10 | Max allowed non-background area fraction in a reliable BG token |
 | shape_size | 64 | Shape template resolution |
 | kmax_shape | 5 | Max clusters per class |
 | cluster_max_iter | 25 | Spherical k-means iterations |
@@ -135,3 +135,4 @@ python -m unittest discover -s idea1_iterclean_bank_adaptshape/tests -p "test_*.
 - Training requires GPU with sufficient VRAM for MedSAM ViT-B
 - First round uses random sampling; selection quality improves with subsequent rounds
 - 3D per-case balancing may discard tokens from very large cases
+- ACDC中目标结构彼此邻近，且feature token具有有限空间分辨率，因此紧密框外一层ring中的部分token会同时覆盖确定背景与其他前景结构。全局非背景覆盖率超过0.10的token会被严格过滤，因而3D的bg_ring_valid_ratio低于2D。这是全局背景纯度约束的预期结果。
