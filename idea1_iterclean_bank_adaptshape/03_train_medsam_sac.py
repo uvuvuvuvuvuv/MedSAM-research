@@ -231,10 +231,11 @@ def parse_train_entries(
         image_path = resolve_path(fold_root, item, "teacher_img")
         instances = prompt_meta.get("instances")
         if not instances:
-            raise ValueError(
-                f"Full record slice_name={slice_name!r} has no instances "
-                f"in prompts"
+            print(
+                f"[SKIP] Full record slice_name={slice_name!r} has no "
+                f"instances in prompts (likely 0 foreground pixels in GT)"
             )
+            continue
         for instance in instances:
             box = instance.get("bbox_teacher", instance.get("bbox"))
             if box is None:

@@ -1162,6 +1162,8 @@ def build_template_command(
         str(args.bg_ring_width_tokens),
         "--max_global_non_bg_coverage",
         str(args.max_global_non_bg_coverage),
+        "--max_fg_fallback_tokens",
+        str(args.max_fg_fallback_tokens),
     ]
 
     if stage_overwrite:
@@ -1748,6 +1750,7 @@ def build_config(
             "cluster_max_iter": args.cluster_max_iter,
             "bg_ring_width_tokens": args.bg_ring_width_tokens,
             "max_global_non_bg_coverage": args.max_global_non_bg_coverage,
+            "max_fg_fallback_tokens": args.max_fg_fallback_tokens,
         },
         "training": {
             "epochs": args.epochs,
@@ -2468,6 +2471,11 @@ def add_support_arguments(
         type=float,
         default=0.10,
     )
+    group.add_argument(
+        "--max_fg_fallback_tokens",
+        type=int,
+        default=4,
+    )
 
 
 def add_pseudo_arguments(
@@ -2728,6 +2736,7 @@ def validate_numeric_args(
         "top_k",
         "train_log_every",
         "pseudo_log_every",
+        "max_fg_fallback_tokens",
     )
     for name in positive_ints:
         value = int(getattr(args, name))

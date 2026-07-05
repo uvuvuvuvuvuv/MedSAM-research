@@ -752,6 +752,14 @@ def process_dataset(
         c: [] for c in class_ids
     }
 
+    # Per-class fallback tracking.
+    fg_fallback_instance_count_c: dict[int, int] = {
+        c: 0 for c in class_ids
+    }
+    fg_fallback_token_count_c: dict[int, int] = {
+        c: 0 for c in class_ids
+    }
+
     # 3D per-case tracking.
     case_fg_parts: dict[str, dict[int, list[np.ndarray]]] = {}
     case_bg_parts: dict[str, dict[int, list[np.ndarray]]] = {}
@@ -764,6 +772,9 @@ def process_dataset(
     zero_bg_instance_count = 0
     instances_with_bg_tokens = 0
     instances_without_bg_tokens = 0
+    fg_fallback_instance_count = 0
+    fg_fallback_token_count = 0
+    fg_fallback_coverage_all: list[float] = []
     total_bg_ring_candidate_tokens = 0
     total_valid_global_bg_tokens = 0
     global_non_bg_coverage_ring_sum = 0.0
@@ -815,10 +826,22 @@ def process_dataset(
 
         instances = prompt_meta.get("instances")
         if not isinstance(instances, list) or not instances:
+            # Verify GT is genuinely empty before skipping.
+            gt = load_mask_npy(gt_path)
+            fg_mask = gt != 0
+            fg_values = gt[fg_mask]
+            fg_count = int((fg_values != 255).sum())
+            if fg_count > 0:
+                raise RuntimeError(
+                    f"Prompt has 0 instances but GT has "
+                    f"{fg_count} foreground pixels for: "
+                    f"{slice_name}. Data inconsistency — "
+                    f"prompt and GT diverge."
+                )
             print(
-                f"[WARN] no instances in prompt for: {slice_name}"
+                f"[WARN] no instances in prompt for: {slice_name} "
+                f"(GT verified: 0 foreground pixels)"
             )
-            skipped_or_invalid_count += 1
             continue
 
         case_id = str(item.get("case_id", "unknown_case"))
@@ -973,11 +996,64 @@ def process_dataset(
             bg_available = int(bg_tokens.shape[0])
             total_valid_global_bg_tokens += bg_available
 
+            fg_source = "primary"
+            fg_fallback_coverage = None
             if fg_available == 0:
-                raise RuntimeError(
-                    f"Zero foreground tokens after coverage filtering "
-                    f"for label_id={label_id}, slice={slice_name}"
+                # Deterministic fallback: select cells where
+                # inst_coverage > 0 within the instance bbox,
+                # sorted by coverage desc → row asc → col asc.
+                fx1 = max(0, int(bbox[0] * feature_w / gt_w))
+                fy1 = max(0, int(bbox[1] * feature_h / gt_h))
+                fx2 = min(feature_w, int(np.ceil(bbox[2] * feature_w / gt_w)))
+                fy2 = min(feature_h, int(np.ceil(bbox[3] * feature_h / gt_h)))
+
+                bbox_mask_f = np.zeros(
+                    (feature_h, feature_w), dtype=bool
                 )
+                if fy2 > fy1 and fx2 > fx1:
+                    bbox_mask_f[fy1:fy2, fx1:fx2] = True
+
+                candidate_mask = (inst_coverage > 0) & bbox_mask_f
+                cand_rows, cand_cols = np.where(candidate_mask)
+                n_candidates = int(cand_rows.size)
+
+                if n_candidates == 0:
+                    max_cov = float(inst_coverage.max())
+                    raise RuntimeError(
+                        f"Zero foreground tokens after coverage "
+                        f"filtering and zero fallback candidates "
+                        f"(max inst_coverage={max_cov:.4f}) "
+                        f"for label_id={label_id}, slice={slice_name}"
+                    )
+
+                cand_coverage = inst_coverage[cand_rows, cand_cols]
+                # lexsort: coverage desc, row asc, col asc.
+                order = np.lexsort((
+                    cand_cols,       # col asc  (tie-breaker 3)
+                    cand_rows,       # row asc  (tie-breaker 2)
+                    -cand_coverage,  # coverage desc (primary)
+                ))
+                cand_rows = cand_rows[order]
+                cand_cols = cand_cols[order]
+                cand_coverage = cand_coverage[order]
+
+                n_select = min(
+                    n_candidates, args.max_fg_fallback_tokens
+                )
+                fallback_rows = cand_rows[:n_select]
+                fallback_cols = cand_cols[:n_select]
+
+                fg_tokens = feature[fallback_rows, fallback_cols]
+                fg_available = int(fg_tokens.shape[0])
+                fg_source = "fallback"
+                fg_fallback_coverage = [
+                    float(cand_coverage[i]) for i in range(n_select)
+                ]
+                fg_fallback_instance_count += 1
+                fg_fallback_token_count += fg_available
+                fg_fallback_coverage_all.extend(fg_fallback_coverage)
+                fg_fallback_instance_count_c[label_id] += 1
+                fg_fallback_token_count_c[label_id] += fg_available
 
             sampled_fg = sample_rows(
                 fg_tokens, args.max_fg_per_instance, rng
@@ -1039,6 +1115,8 @@ def process_dataset(
                 "fg_tokens_sampled": fg_sampled,
                 "bg_tokens_sampled": bg_sampled,
                 "has_shape": has_shape,
+                "fg_source": fg_source,
+                "fg_fallback_coverage": fg_fallback_coverage,
             })
 
         processed_full_slice_names.append(slice_name)
@@ -1114,6 +1192,7 @@ def process_dataset(
 
     stats: dict[str, Any] = {
         "schema_version": 1,
+        "support_stats_schema_version": 2,
         "method": args.method,
         "round_tag": round_tag,
         "run_id": run_id,
@@ -1140,6 +1219,14 @@ def process_dataset(
         "zero_bg_instance_count": zero_bg_instance_count,
         "instances_with_bg_tokens": instances_with_bg_tokens,
         "instances_without_bg_tokens": instances_without_bg_tokens,
+        "fg_fallback_instance_count": fg_fallback_instance_count,
+        "fg_fallback_token_count": fg_fallback_token_count,
+        "instances_with_primary_fg": total_instance_count - fg_fallback_instance_count,
+        "instances_with_fallback_fg": fg_fallback_instance_count,
+        "fg_primary_coverage_threshold": args.fg_coverage_threshold,
+        "fg_fallback_coverage_min": float(min(fg_fallback_coverage_all)) if fg_fallback_coverage_all else None,
+        "fg_fallback_coverage_mean": float(np.mean(fg_fallback_coverage_all)) if fg_fallback_coverage_all else None,
+        "fg_fallback_coverage_max": float(max(fg_fallback_coverage_all)) if fg_fallback_coverage_all else None,
         "class_ids": class_ids,
         "fg_coverage_threshold": args.fg_coverage_threshold,
         "max_global_non_bg_coverage": args.max_global_non_bg_coverage,
@@ -1174,6 +1261,7 @@ def process_dataset(
         "kmax_shape": args.kmax_shape,
         "cluster_max_iter": args.cluster_max_iter,
         "min_cluster_support": 2,
+        "max_fg_fallback_tokens": args.max_fg_fallback_tokens,
         "classes": {},
         "per_instance_stats": per_instance_stats[:50],
         "input_paths": {
@@ -1295,6 +1383,8 @@ def process_dataset(
             "bg_tokens_collected": int(bg_all.shape[0]) if bg_parts else 0,
             "fg_tokens_bank": int(fg_bank.shape[0]),
             "bg_tokens_bank": int(bg_bank.shape[0]),
+            "fg_fallback_instance_count": fg_fallback_instance_count_c.get(class_id, 0),
+            "fg_fallback_token_count": fg_fallback_token_count_c.get(class_id, 0),
             "K_shape": K_shape,
             "candidate_Ks": candidate_Ks,
             "cluster_instance_counts": cluster_instance_counts.tolist(),
@@ -1458,6 +1548,17 @@ def build_parser() -> argparse.ArgumentParser:
             "original tight box prompt. 0 disables the ring."
         ),
     )
+    bank_group.add_argument(
+        "--max_fg_fallback_tokens",
+        type=int,
+        default=4,
+        help=(
+            "Maximum fallback FG tokens when primary coverage "
+            "filtering yields zero tokens. Fallback selects "
+            "cells with inst_coverage > 0, sorted "
+            "deterministically."
+        ),
+    )
 
     # Shape clustering parameters.
     shape_group = parser.add_argument_group("Shape Clustering")
@@ -1495,6 +1596,7 @@ def validate_args(args: argparse.Namespace) -> None:
         "shape_size",
         "kmax_shape",
         "cluster_max_iter",
+        "max_fg_fallback_tokens",
     ):
         value = int(getattr(args, name))
         if value <= 0:
