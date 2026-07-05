@@ -3,24 +3,41 @@ from __future__ import annotations
 import argparse
 import json
 import random
+import sys
 from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
+# ---------------------------------------------------------------------------
+# Import from shared modules
+# ---------------------------------------------------------------------------
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
-METHOD_DEFAULT = "idea1_iterclean_bank_adaptshape"
-KNOWN_3D_DATASETS = {"btcv", "synapse", "acdc", "prostate158"}
+try:
+    from .pipeline_common import (
+        METHOD_DEFAULT,
+        build_fold_paths,
+        get_round_tag,
+        is_3d_dataset,
+        save_json_atomic,
+        validate_writable_path,
+    )
+except ImportError:
+    from pipeline_common import (  # type: ignore[no-redef]
+        METHOD_DEFAULT,
+        build_fold_paths,
+        get_round_tag,
+        is_3d_dataset,
+        save_json_atomic,
+        validate_writable_path,
+    )
 
 
 def load_json(path: Path) -> Any:
     with path.open("r", encoding="utf-8") as f:
         return json.load(f)
-
-
-def save_json(obj: Any, path: Path) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8") as f:
-        json.dump(obj, f, indent=2, ensure_ascii=False)
 
 
 def get_slice_name(item: dict[str, Any]) -> str:
@@ -99,7 +116,7 @@ def infer_is_3d(
     dataset: str,
     split_meta: dict[str, Any],
 ) -> bool:
-    if dataset.lower() in KNOWN_3D_DATASETS:
+    if is_3d_dataset(dataset):
         return True
 
     for key in ("is_3d", "volume_level_split", "has_volume"):
@@ -436,6 +453,7 @@ def process_dataset(
     fold: str,
     method: str,
     round_id: int,
+    round_tag: str,
     sampling_mode: str,
     full_count: int | None,
     selection_path: Path | None,
@@ -452,31 +470,6 @@ def process_dataset(
     if not manifest_path.exists():
         raise FileNotFoundError(
             f"manifest.json not found: {manifest_path}"
-        )
-
-    out_path = meta_dir / f"full_box_split_{method}.json"
-    summary_path = meta_dir / f"full_box_split_summary_{method}.json"
-    selection_state_path = meta_dir / f"full_selection_{method}.json"
-
-    output_paths = [
-        out_path,
-        summary_path,
-        selection_state_path,
-    ]
-    existing_paths = [
-        path
-        for path in output_paths
-        if path.exists()
-    ]
-
-    if len(existing_paths) == len(output_paths) and not overwrite:
-        print(f"[SKIP] outputs already exist for {dataset}/{fold}: {method}")
-        return
-
-    if existing_paths and not overwrite:
-        raise FileExistsError(
-            "Partial outputs already exist. Use --overwrite to regenerate "
-            f"them consistently. Existing: {existing_paths}"
         )
 
     manifest = load_json(manifest_path)
@@ -517,6 +510,43 @@ def process_dataset(
 
     class_ids = parse_class_ids(label_meta)
     is_3d = infer_is_3d(dataset, split_meta)
+
+    # Validate round_tag against formal contract
+    expected_round_tag = get_round_tag(round_id, is_3d)
+    if round_tag != expected_round_tag:
+        raise ValueError(
+            f"round_tag mismatch: expected={expected_round_tag!r} "
+            f"(round_id={round_id}, dataset={dataset}, "
+            f"is_3d={is_3d}), got={round_tag!r}"
+        )
+
+    # Build output paths via pipeline_common
+    paths = build_fold_paths(
+        processed_root=processed_root,
+        dataset=dataset,
+        fold=fold,
+        method=method,
+        round_tag=round_tag,
+    )
+    out_path = paths["split_path"]
+    summary_path = paths["split_summary_path"]
+
+    # Validate writable
+    for p in (out_path, summary_path):
+        validate_writable_path(p)
+
+    output_paths = [out_path, summary_path]
+    existing_paths = [p for p in output_paths if p.exists()]
+
+    if len(existing_paths) == len(output_paths) and not overwrite:
+        print(f"[SKIP] outputs already exist for {dataset}/{fold}: {method}")
+        return
+
+    if existing_paths and not overwrite:
+        raise FileExistsError(
+            "Partial outputs already exist. Use --overwrite to regenerate "
+            f"them consistently. Existing: {existing_paths}"
+        )
 
     full_cases: set[str] = set()
     random_order_slice_names: list[str] | None = None
@@ -661,6 +691,8 @@ def process_dataset(
         "fold": fold,
         "method": method,
         "round_id": int(round_id),
+        "round_tag": round_tag,
+        "run_id": paths["run_id"],
         "sampling_mode": sampling_mode,
         "sampling_unit": "case" if is_3d else "image",
         "selection_source": selection_source,
@@ -690,36 +722,13 @@ def process_dataset(
         "test_leakage": 0,
     }
 
-    selection_state = {
-        "schema_version": 1,
-        "dataset": dataset,
-        "fold": fold,
-        "method": method,
-        "round_id": int(round_id),
-        "sampling_mode": sampling_mode,
-        "sampling_unit": "case" if is_3d else "image",
-        "selection_source": selection_source,
-        "seed": int(seed),
-        "requested_full_count": full_count,
-        "cumulative_full_count": full_unit_count,
-        "cumulative_full_slice_names": sorted(full_slices),
-        "cumulative_full_case_ids": (
-            sorted(full_cases)
-            if is_3d
-            else None
-        ),
-        "random_order_slice_names": random_order_slice_names,
-        "random_order_case_ids": random_order_case_ids,
-    }
-
-    save_json(records, out_path)
-    save_json(summary, summary_path)
-    save_json(selection_state, selection_state_path)
+    save_json_atomic(records, out_path)
+    save_json_atomic(summary, summary_path)
 
     print(f"[OK] {dataset}/{fold}")
     print(
         f"     round={round_id} mode={sampling_mode} "
-        f"is_3d={is_3d}"
+        f"is_3d={is_3d} round_tag={round_tag}"
     )
     print(
         f"     train={len(train_items)} full={n_full} box={n_box} "
@@ -734,7 +743,6 @@ def process_dataset(
 
     print(f"     split={out_path}")
     print(f"     summary={summary_path}")
-    print(f"     selection={selection_state_path}")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -770,6 +778,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=0,
     )
     parser.add_argument(
+        "--round_tag",
+        required=True,
+        help="Round tag, e.g. r00_full5 (2D) or r00_case1 (3D). "
+             "Must match get_round_tag(round_id, is_3d).",
+    )
+    parser.add_argument(
         "--sampling_mode",
         choices=("random", "external"),
         default="random",
@@ -795,6 +809,15 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Cumulative Full selection JSON used in external mode. "
             "The path may contain {dataset} and {fold} placeholders."
+        ),
+    )
+    parser.add_argument(
+        "--previous_round_tag",
+        default=None,
+        help=(
+            "Round tag of the previous round. When provided with "
+            "--sampling_mode=external, the selection file is derived as "
+            "meta/full_selection_round_{round_id}.json."
         ),
     )
     parser.add_argument(
@@ -835,9 +858,10 @@ def main() -> None:
             )
 
     if args.sampling_mode == "external":
-        if args.selection_file is None:
+        if args.selection_file is None and args.previous_round_tag is None:
             raise ValueError(
-                "--selection_file is required in external mode"
+                "--selection_file or --previous_round_tag "
+                "is required in external mode"
             )
 
     datasets = [
@@ -850,11 +874,24 @@ def main() -> None:
         raise ValueError("--datasets is empty")
 
     for dataset in datasets:
-        selection_path = resolve_selection_path(
-            selection_file=args.selection_file,
-            dataset=dataset,
-            fold=args.fold,
-        )
+        # Resolve selection file for external mode
+        selection_path = None
+        if args.sampling_mode == "external":
+            if args.selection_file is not None:
+                selection_path = resolve_selection_path(
+                    selection_file=args.selection_file,
+                    dataset=dataset,
+                    fold=args.fold,
+                )
+            elif args.previous_round_tag is not None:
+                # Derive from previous round's hard selection hand-off file
+                selection_path = (
+                    args.processed_root
+                    / dataset
+                    / args.fold
+                    / "meta"
+                    / f"full_selection_round_{args.round_id}.json"
+                )
 
         process_dataset(
             processed_root=args.processed_root,
@@ -862,6 +899,7 @@ def main() -> None:
             fold=args.fold,
             method=args.method,
             round_id=args.round_id,
+            round_tag=args.round_tag,
             sampling_mode=args.sampling_mode,
             full_count=args.full_count,
             selection_path=selection_path,

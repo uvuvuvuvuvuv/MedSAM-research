@@ -20,7 +20,36 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-METHOD_DEFAULT = "idea1_iterclean_bank_adaptshape"
+# ---------------------------------------------------------------------------
+# Import from shared modules
+# ---------------------------------------------------------------------------
+try:
+    from .pipeline_common import (
+        METHOD_DEFAULT,
+        build_fold_paths,
+        save_json_atomic,
+        validate_writable_path,
+    )
+    from .instance_utils import (
+        bbox_iou,
+        load_gt_array,
+        load_instance_target,
+        match_instance_mask,
+    )
+except ImportError:
+    from pipeline_common import (  # type: ignore[no-redef]
+        METHOD_DEFAULT,
+        build_fold_paths,
+        save_json_atomic,
+        validate_writable_path,
+    )
+    from instance_utils import (  # type: ignore[no-redef]
+        bbox_iou,
+        load_gt_array,
+        load_instance_target,
+        match_instance_mask,
+    )
+
 MODEL_TYPE = "vit_b"
 
 
@@ -87,110 +116,6 @@ def load_image_tensor(path: Path, device: torch.device) -> torch.Tensor:
         .float()
         .to(device)
     )
-
-
-def _load_gt_array(path: Path) -> np.ndarray:
-    gt = np.load(path)
-    if gt.ndim == 3:
-        if gt.shape[-1] == 1:
-            gt = gt[..., 0]
-        elif gt.shape[0] == 1:
-            gt = gt[0]
-        else:
-            raise ValueError(f"Unexpected GT shape {gt.shape} from {path}")
-    return gt.astype(np.int64)
-
-
-def _bbox_iou(a: list[float], b: list[float]) -> float:
-    x1 = max(a[0], b[0])
-    y1 = max(a[1], b[1])
-    x2 = min(a[2], b[2])
-    y2 = min(a[3], b[3])
-    if x1 >= x2 or y1 >= y2:
-        return 0.0
-    inter = (x2 - x1) * (y2 - y1)
-    area_a = max((a[2] - a[0]) * (a[3] - a[1]), 0)
-    area_b = max((b[2] - b[0]) * (b[3] - b[1]), 0)
-    union = area_a + area_b - inter
-    return float(inter / union) if union > 0 else 0.0
-
-
-def load_instance_target(
-    path: Path,
-    device: torch.device,
-    label_id: int,
-    bbox: list[float],
-    component_id: int | None,
-) -> torch.Tensor:
-    gt = _load_gt_array(path)
-    mask_all = (gt == int(label_id))
-
-    if not mask_all.any():
-        raise ValueError(
-            f"label_id={label_id} not found in GT: {path}"
-        )
-
-    mask_all_uint8 = mask_all.astype(np.uint8)
-    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(
-        mask_all_uint8, connectivity=8
-    )
-
-    if num_labels <= 1:
-        raise ValueError(
-            f"No connected components found for label_id={label_id} "
-            f"in {path}"
-        )
-
-    if component_id is not None:
-        if not isinstance(component_id, int) or component_id < 1:
-            raise ValueError(
-                f"component_id must be positive int, got {component_id!r} "
-                f"for label_id={label_id} in {path}"
-            )
-        if component_id >= num_labels:
-            raise ValueError(
-                f"component_id={component_id} out of range "
-                f"(found {num_labels - 1} components) "
-                f"for label_id={label_id} in {path}"
-            )
-        selected_label = int(component_id)
-        selected_mask = (labels == selected_label)
-        if not selected_mask.any():
-            raise ValueError(
-                f"component_id={component_id} produced empty mask "
-                f"for label_id={label_id} in {path}"
-            )
-    else:
-        best_idx: int | None = None
-        best_iou = -1.0
-        for comp_idx in range(1, num_labels):
-            comp_mask = (labels == comp_idx)
-            rows, cols = np.where(comp_mask)
-            if len(rows) == 0:
-                continue
-            comp_bbox = [
-                float(cols.min()), float(rows.min()),
-                float(cols.max()) + 1, float(rows.max()) + 1,
-            ]
-            iou = _bbox_iou(bbox, comp_bbox)
-            if iou > best_iou:
-                best_iou = iou
-                best_idx = comp_idx
-
-        if best_idx is None or best_iou <= 0.0:
-            raise ValueError(
-                f"No connected component overlaps with bbox={bbox} "
-                f"for label_id={label_id} in {path}"
-            )
-        selected_mask = (labels == best_idx)
-        if not selected_mask.any():
-            raise ValueError(
-                f"bbox-matched component produced empty mask "
-                f"for label_id={label_id} in {path}"
-            )
-
-    target = selected_mask.astype(np.float32)
-    return torch.from_numpy(target).unsqueeze(0).unsqueeze(0).float().to(device)
 
 
 def build_medsam(checkpoint: Path, device: torch.device):
@@ -341,14 +266,21 @@ def save_checkpoint(path: Path, model, extra: dict[str, Any]) -> None:
 
 def train_one_dataset(args: argparse.Namespace, dataset: str) -> None:
     device = torch.device(args.device)
-    fold_root = args.processed_root / dataset / args.fold
-    meta_dir = fold_root / "meta"
+
+    paths = build_fold_paths(
+        processed_root=args.processed_root,
+        dataset=dataset,
+        fold=args.fold,
+        method=args.method,
+        round_tag=args.round_tag,
+        medsam_ft_root=args.medsam_ft_root,
+    )
+    fold_root = paths["fold_root"]
+    meta_dir = paths["meta_dir"]
 
     manifest = load_json(meta_dir / "manifest.json")
     prompts = load_json(fold_root / "prompts" / "prompts_train.json")
-    split_records = load_json(
-        meta_dir / f"full_box_split_{args.method}.json"
-    )
+    split_records = load_json(paths["split_path"])
 
     entries = parse_train_entries(fold_root, manifest, prompts, split_records)
     full_entries = [entry for entry in entries if entry["label_mode"] == "full"]
@@ -392,11 +324,15 @@ def train_one_dataset(args: argparse.Namespace, dataset: str) -> None:
         weight_decay=args.weight_decay,
     )
 
-    out_dir = args.out_root / dataset / args.fold
+    out_dir = paths["train_root"]
+    log_path = paths["train_log_path"]
+    last_checkpoint = paths["train_last_path"]
+    ema_checkpoint = paths["train_ema_path"]
+    summary_path = paths["train_summary_path"]
+
+    for p in (out_dir, log_path, last_checkpoint, ema_checkpoint, summary_path):
+        validate_writable_path(p)
     out_dir.mkdir(parents=True, exist_ok=True)
-    log_path = out_dir / f"medsam_ft_log_{args.method}.csv"
-    last_checkpoint = out_dir / "medsam_sac_last.pth"
-    ema_checkpoint = out_dir / "medsam_sac_ema.pth"
 
     log_fields = [
         "epoch",
@@ -525,6 +461,12 @@ def train_one_dataset(args: argparse.Namespace, dataset: str) -> None:
         "dataset": dataset,
         "fold": args.fold,
         "method": args.method,
+        "round_tag": args.round_tag,
+        "run_id": paths["run_id"],
+        "base_checkpoint": str(args.checkpoint),
+        "train_root": str(out_dir),
+        "train_last_path": str(last_checkpoint),
+        "train_ema_path": str(ema_checkpoint),
         "epochs": args.epochs,
         "global_step": global_step,
         "training_mode": "full_only",
@@ -546,7 +488,7 @@ def train_one_dataset(args: argparse.Namespace, dataset: str) -> None:
         "checkpoint_ema": str(ema_checkpoint),
         "log_path": str(log_path),
     }
-    save_json(summary, out_dir / f"medsam_ft_summary_{args.method}.json")
+    save_json_atomic(summary, summary_path)
 
     print(f"[OK] training completed: {dataset}")
     print(f"     last = {last_checkpoint}")
@@ -563,7 +505,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--datasets", required=True)
     parser.add_argument("--fold", default="fold_0")
     parser.add_argument("--method", default=METHOD_DEFAULT)
-    parser.add_argument("--out_root", type=Path, required=True)
+    parser.add_argument(
+        "--round_tag", required=True,
+        help="Round tag, e.g. r00_full5 (2D) or r00_case1 (3D).",
+    )
+    parser.add_argument(
+        "--medsam_ft_root", type=Path, required=True,
+        help="Root directory for fine-tuning outputs.",
+    )
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--seed", type=int, default=2026)
 
@@ -575,6 +524,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max_grad_norm", type=float, default=1.0)
 
     parser.add_argument("--log_every", type=int, default=10)
+    parser.add_argument("--overwrite", action="store_true")
     return parser
 
 
@@ -609,6 +559,12 @@ def validate_args(args: argparse.Namespace) -> None:
         raise FileNotFoundError(
             f"processed_root not found: {args.processed_root}"
         )
+    if not args.medsam_ft_root.is_dir():
+        if args.medsam_ft_root.exists():
+            raise FileNotFoundError(
+                f"medsam_ft_root is not a directory: {args.medsam_ft_root}"
+            )
+        args.medsam_ft_root.mkdir(parents=True, exist_ok=True)
 
 
 def main() -> None:
