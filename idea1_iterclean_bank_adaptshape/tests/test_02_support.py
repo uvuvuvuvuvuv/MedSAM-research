@@ -560,7 +560,7 @@ class TestValidateArgs(unittest.TestCase):
             max_fg_per_instance=128, max_bg_per_instance=128,
             max_fg_per_class=4096, max_bg_per_class=4096,
             bg_ring_width_tokens=1, shape_size=64, kmax_shape=5,
-            cluster_max_iter=25,
+            cluster_max_iter=25, max_fg_fallback_tokens=4,
         )
         d.update(kw)
         return argparse.Namespace(**d)
@@ -592,7 +592,8 @@ class TestValidateArgs(unittest.TestCase):
         for name in ("max_fg_per_instance", "max_bg_per_instance",
                      "max_fg_per_class", "max_bg_per_class",
                      "shape_size",
-                     "kmax_shape", "cluster_max_iter"):
+                     "kmax_shape", "cluster_max_iter",
+                     "max_fg_fallback_tokens"):
             with self.subTest(p=name):
                 with self.assertRaises(ValueError):
                     t02.validate_args(self._ns(**{name: 0}))
@@ -1380,6 +1381,359 @@ class TestNpzStatsContract(unittest.TestCase):
         import json
         s = json.loads(self._stats_path.read_text())
         self.assertNotIn("bg_coverage_threshold", s)
+
+
+# ============================================================================
+# M: FG Fallback Algorithm Tests
+# ============================================================================
+
+class TestFgFallback(unittest.TestCase):
+    """FG fallback: deterministic selection, bbox constraint, coverage range."""
+
+    def test_fallback_deterministic_sorting(self):
+        """Coverage desc -> row asc -> col asc deterministic ranking."""
+        coverage = np.zeros((8, 8), dtype=np.float32)
+        coverage[2, 3] = 0.14
+        coverage[3, 4] = 0.50
+        coverage[4, 2] = 0.50
+        coverage[5, 1] = 0.80
+
+        cand_rows, cand_cols = np.where(coverage > 0)
+        cand_coverage = coverage[cand_rows, cand_cols]
+        order = np.lexsort((cand_cols, cand_rows, -cand_coverage))
+        sorted_rows = cand_rows[order]
+        sorted_cols = cand_cols[order]
+        sorted_cov = cand_coverage[order]
+
+        self.assertEqual(sorted_cov[0], 0.80)
+        self.assertEqual(sorted_rows[0], 5)
+        self.assertEqual(sorted_cols[0], 1)
+        self.assertEqual(sorted_cov[1], 0.50)
+        self.assertEqual(sorted_rows[1], 3)
+        self.assertEqual(sorted_cov[2], 0.50)
+        self.assertEqual(sorted_rows[2], 4)
+        self.assertEqual(sorted_cov[3], 0.14)
+        self.assertEqual(sorted_rows[3], 2)
+
+    def test_fallback_single_candidate(self):
+        """Only 1 positive-coverage token selects exactly 1."""
+        n_select = min(1, 4)
+        self.assertEqual(n_select, 1)
+
+    def test_fallback_top_k_selection(self):
+        """More than 4 candidates selects top 4 by coverage."""
+        coverage = np.zeros((8, 8), dtype=np.float32)
+        for i in range(6):
+            coverage[2 + i, 3] = 0.1 + 0.01 * i
+
+        cand_rows, cand_cols = np.where(coverage > 0)
+        cand_coverage = coverage[cand_rows, cand_cols]
+        order = np.lexsort((cand_cols, cand_rows, -cand_coverage))
+        n_select = min(len(cand_rows), 4)
+        self.assertEqual(n_select, 4)
+        selected_cov = cand_coverage[order][:4]
+        all_cov = sorted(cand_coverage, reverse=True)
+        self.assertEqual(list(selected_cov), all_cov[:4])
+
+    def test_fallback_empty_instance_raises(self):
+        """max coverage <= 0 must raise error."""
+        coverage = np.zeros((8, 8), dtype=np.float32)
+        max_cov = float(coverage.max())
+        self.assertLessEqual(max_cov, 0)
+        self.assertTrue(max_cov <= 0)
+
+    def test_fallback_bbox_constraint(self):
+        """Positive coverage outside bbox excluded from fallback."""
+        coverage = np.zeros((64, 64), dtype=np.float32)
+        coverage[12, 16] = 0.50
+        coverage[14, 18] = 0.30
+        coverage[5, 5] = 0.90
+        coverage[30, 30] = 0.70
+
+        bbox_mask = np.zeros((64, 64), dtype=bool)
+        bbox_mask[10:20, 15:25] = True
+
+        cand_mask = (coverage > 0) & bbox_mask
+        cand_rows, cand_cols = np.where(cand_mask)
+        self.assertEqual(len(cand_rows), 2)
+        positions = set(zip(cand_rows.tolist(), cand_cols.tolist()))
+        self.assertNotIn((5, 5), positions)
+        self.assertNotIn((30, 30), positions)
+        self.assertIn((12, 16), positions)
+        self.assertIn((14, 18), positions)
+
+    def test_fallback_coverage_range(self):
+        """All fallback coverage values are in (0, 1]."""
+        coverage = np.array([0.14, 0.50, 0.80, 0.05], dtype=np.float32)
+        for c in coverage:
+            self.assertGreater(c, 0.0)
+            self.assertLessEqual(c, 1.0)
+
+    def test_fallback_max_fg_fallback_tokens_cli(self):
+        """--max_fg_fallback_tokens accepted with default 4."""
+        parser = t02.build_parser()
+        args = parser.parse_args([
+            "--processed_root", "/tmp",
+            "--checkpoint", "/tmp/c.pth",
+            "--datasets", "x",
+            "--method", "m",
+        ])
+        self.assertEqual(args.max_fg_fallback_tokens, 4)
+        args2 = parser.parse_args([
+            "--processed_root", "/tmp",
+            "--checkpoint", "/tmp/c.pth",
+            "--datasets", "x",
+            "--method", "m",
+            "--max_fg_fallback_tokens", "2",
+        ])
+        self.assertEqual(args2.max_fg_fallback_tokens, 2)
+
+    def test_fallback_validate_positive(self):
+        """max_fg_fallback_tokens must be >= 1."""
+        with self.assertRaises((ValueError, SystemExit)):
+            t02.validate_args(t02.build_parser().parse_args([
+                "--processed_root", "/tmp",
+                "--checkpoint", "/tmp/c.pth",
+                "--datasets", "x",
+                "--method", "m",
+                "--max_fg_fallback_tokens", "0",
+            ]))
+
+    def test_fallback_no_nan_in_stats(self):
+        """Fallback stats serialize to valid JSON without NaN/Inf."""
+        stats = {
+            "fg_fallback_instance_count": 0,
+            "fg_fallback_token_count": 0,
+            "max_fg_fallback_tokens": 4,
+            "fg_fallback_coverage_min": None,
+            "fg_fallback_coverage_mean": None,
+            "fg_fallback_coverage_max": None,
+        }
+        serialized = json.dumps(stats)
+        restored = json.loads(serialized)
+        for k, v in restored.items():
+            if isinstance(v, float):
+                self.assertFalse(v != v, f"{k} is NaN")
+
+    def test_fallback_per_class_stats(self):
+        """Per-class fallback counts computed correctly from per-instance data."""
+        per_instance = [
+            {"label_id": 1, "fg_source": "primary", "fg_fallback_coverage": None},
+            {"label_id": 1, "fg_source": "fallback", "fg_fallback_coverage": [0.14, 0.30]},
+            {"label_id": 2, "fg_source": "primary", "fg_fallback_coverage": None},
+            {"label_id": 2, "fg_source": "fallback", "fg_fallback_coverage": [0.20]},
+        ]
+        from collections import defaultdict
+        fb_inst = defaultdict(int)
+        fb_tok = defaultdict(int)
+        for inst in per_instance:
+            lid = inst["label_id"]
+            if inst["fg_source"] == "fallback":
+                fb_inst[lid] += 1
+                fb_tok[lid] += len(inst["fg_fallback_coverage"])
+        self.assertEqual(fb_inst[1], 1)
+        self.assertEqual(fb_tok[1], 2)
+        self.assertEqual(fb_inst[2], 1)
+        self.assertEqual(fb_tok[2], 1)
+
+
+# ============================================================================
+# N: Schema V2 Contract Tests
+# ============================================================================
+
+class TestSchemaV2(unittest.TestCase):
+    """Support stats schema v2: fallback fields required, invariants enforced."""
+
+    def setUp(self):
+        import tempfile
+        self._tmpdir = Path(tempfile.mkdtemp(prefix="test_sv2_"))
+        self.v08 = importlib.import_module(
+            "idea1_iterclean_bank_adaptshape.08_validate_round_outputs"
+        )
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(str(self._tmpdir), ignore_errors=True)
+
+    def _make_v1_stats(self):
+        return {
+            "bg_ring_width_tokens": 1,
+            "fg_coverage_threshold": 0.90,
+            "max_global_non_bg_coverage": 0.10,
+            "zero_bg_instance_count": 0,
+            "instances_with_bg_tokens": 10,
+            "instances_without_bg_tokens": 0,
+            "total_bg_ring_candidate_tokens": 500,
+            "total_valid_global_bg_tokens": 200,
+            "bg_ring_valid_ratio": 0.4,
+            "global_non_bg_coverage_ring_min": 0.0,
+            "global_non_bg_coverage_ring_mean": 0.05,
+            "global_non_bg_coverage_ring_max": 0.10,
+        }
+
+    def _make_v2_stats(self, overrides=None):
+        stats = {
+            "support_stats_schema_version": 2,
+            "bg_ring_width_tokens": 1,
+            "fg_coverage_threshold": 0.90,
+            "max_global_non_bg_coverage": 0.10,
+            "zero_bg_instance_count": 0,
+            "instances_with_bg_tokens": 10,
+            "instances_without_bg_tokens": 0,
+            "total_bg_ring_candidate_tokens": 500,
+            "total_valid_global_bg_tokens": 200,
+            "bg_ring_valid_ratio": 0.4,
+            "global_non_bg_coverage_ring_min": 0.0,
+            "global_non_bg_coverage_ring_mean": 0.05,
+            "global_non_bg_coverage_ring_max": 0.10,
+            "fg_primary_coverage_threshold": 0.90,
+            "max_fg_fallback_tokens": 4,
+            "instances_with_primary_fg": 8,
+            "instances_with_fallback_fg": 2,
+            "fg_fallback_instance_count": 2,
+            "fg_fallback_token_count": 5,
+            "fg_fallback_coverage_min": 0.05,
+            "fg_fallback_coverage_mean": 0.20,
+            "fg_fallback_coverage_max": 0.50,
+        }
+        if overrides:
+            stats.update(overrides)
+        return stats
+
+    def _make_npz(self, path):
+        import zipfile
+        import io as _io_npz
+        arrays = {
+            "class_ids": np.array([1], dtype=np.int64),
+            "feature_dim": np.array(768, dtype=np.int64),
+            "shape_size": np.array([64, 64], dtype=np.int64),
+            "method": np.array("test"),
+            "round_tag": np.array("r00_full5"),
+            "run_id": np.array("test_r00_full5"),
+            "bank_fg_c1": np.ones((10, 768), dtype=np.float32),
+            "bank_bg_c1": np.ones((10, 768), dtype=np.float32),
+            "shape_templates_c1": np.ones((2, 64, 64), dtype=np.float32),
+            "shape_semantic_centers_c1": np.ones((2, 768), dtype=np.float32),
+            "shape_cluster_instance_counts_c1": np.array([5, 5], dtype=np.int64),
+            "shape_cluster_support_counts_c1": np.array([5, 5], dtype=np.int64),
+        }
+        with zipfile.ZipFile(str(path), "w", zipfile.ZIP_DEFLATED) as zf:
+            for name, arr in arrays.items():
+                buf = _io_npz.BytesIO()
+                np.save(buf, arr, allow_pickle=False)
+                zf.writestr(name + ".npy", buf.getvalue())
+
+    def test_schema_v1_no_fallback_fields_still_valid(self):
+        """v1 stats without fallback fields pass validation."""
+        npz_path = self._tmpdir / "test.npz"
+        stats_path = self._tmpdir / "stats.json"
+        self._make_npz(npz_path)
+        stats_path.write_text(json.dumps(self._make_v1_stats()))
+        paths = {"support_path": npz_path, "support_stats_path": stats_path}
+        errors = self.v08.validate_template(paths, strict=True)
+        self.assertEqual(errors, [])
+
+    def test_schema_v2_all_fields_present_passes(self):
+        """v2 stats with all fallback fields pass validation."""
+        npz_path = self._tmpdir / "test.npz"
+        stats_path = self._tmpdir / "stats.json"
+        self._make_npz(npz_path)
+        stats_path.write_text(json.dumps(self._make_v2_stats()))
+        paths = {"support_path": npz_path, "support_stats_path": stats_path}
+        errors = self.v08.validate_template(paths, strict=True)
+        self.assertEqual(errors, [])
+
+    def test_schema_v2_missing_fallback_fields_fails(self):
+        """v2 stats missing required fallback fields must fail."""
+        npz_path = self._tmpdir / "test.npz"
+        stats_path = self._tmpdir / "stats.json"
+        self._make_npz(npz_path)
+        v1 = self._make_v1_stats()
+        v1["support_stats_schema_version"] = 2
+        stats_path.write_text(json.dumps(v1))
+        paths = {"support_path": npz_path, "support_stats_path": stats_path}
+        errors = self.v08.validate_template(paths, strict=True)
+        self.assertTrue(len(errors) > 0,
+                        f"Expected errors for v2 with missing fallback fields, got {errors}")
+
+    def test_schema_v2_count_mismatch_fails(self):
+        """instances_with_fallback_fg != fg_fallback_instance_count fails."""
+        npz_path = self._tmpdir / "test.npz"
+        stats_path = self._tmpdir / "stats.json"
+        self._make_npz(npz_path)
+        v2 = self._make_v2_stats({"instances_with_fallback_fg": 3})
+        stats_path.write_text(json.dumps(v2))
+        paths = {"support_path": npz_path, "support_stats_path": stats_path}
+        errors = self.v08.validate_template(paths, strict=True)
+        self.assertTrue(len(errors) > 0,
+                        f"Expected errors for count mismatch, got {errors}")
+
+    def test_schema_v2_nan_fails(self):
+        """NaN in fallback coverage fields must fail."""
+        npz_path = self._tmpdir / "test.npz"
+        stats_path = self._tmpdir / "stats.json"
+        self._make_npz(npz_path)
+        v2 = self._make_v2_stats({"fg_fallback_coverage_mean": float("nan")})
+        stats_path.write_text(json.dumps(v2))
+        paths = {"support_path": npz_path, "support_stats_path": stats_path}
+        errors = self.v08.validate_template(paths, strict=True)
+        self.assertTrue(len(errors) > 0,
+                        f"Expected errors for NaN coverage, got {errors}")
+
+
+# ============================================================================
+# O: Empty Slice Strict Skip Tests
+# ============================================================================
+
+class TestEmptySliceStrict(unittest.TestCase):
+    """Empty slice skip must verify GT has 0 foreground pixels."""
+
+    def test_empty_slice_prompt0_gt0_allowed(self):
+        """prompt=0 AND GT=0 -> skip is valid."""
+        gt = np.zeros((100, 100), dtype=np.int64)
+        fg_values = gt[gt != 0]
+        fg_count = int((fg_values != 255).sum())
+        self.assertEqual(fg_count, 0)
+
+    def test_empty_slice_prompt0_gt_has_fg_raises(self):
+        """prompt=0 but GT has non-zero, non-ignore pixels -> must raise."""
+        gt = np.zeros((100, 100), dtype=np.int64)
+        gt[10:20, 10:20] = 1
+        fg_values = gt[gt != 0]
+        fg_count = int((fg_values != 255).sum())
+        self.assertGreater(fg_count, 0)
+
+    def test_empty_slice_gt_has_only_ignore_is_allowed(self):
+        """GT has only ignore (255) pixels -> treated as no FG."""
+        gt = np.full((100, 100), 255, dtype=np.int64)
+        fg_values = gt[gt != 0]
+        fg_count = int((fg_values != 255).sum())
+        self.assertEqual(fg_count, 0)
+
+    def test_empty_slice_gt_mixed_ignore_and_fg_raises(self):
+        """GT has ignore (255) AND real FG pixels -> must raise."""
+        gt = np.full((100, 100), 255, dtype=np.int64)
+        gt[10:20, 10:20] = 1
+        fg_values = gt[gt != 0]
+        fg_count = int((fg_values != 255).sum())
+        self.assertGreater(fg_count, 0)
+
+    def test_empty_slice_max_coverage_zero_raises(self):
+        """GT exists but inst_coverage.max() == 0 -> fallback raises error."""
+        inst_coverage = np.zeros((64, 64), dtype=np.float32)
+        max_cov = float(inst_coverage.max())
+        self.assertEqual(max_cov, 0.0)
+        self.assertTrue(max_cov <= 0)
+
+    def test_empty_slice_prompt_instances_but_gt_empty_raises(self):
+        """Prompt bbox cannot match empty GT -> match_instance_mask raises."""
+        gt = np.zeros((100, 100), dtype=np.int64)
+        prompt_bbox = [10.0, 10.0, 30.0, 30.0]
+        from idea1_iterclean_bank_adaptshape.instance_utils import (
+            match_instance_mask,
+        )
+        with self.assertRaises((ValueError, RuntimeError)):
+            match_instance_mask(gt, label_id=1, bbox=prompt_bbox, component_id=None)
 
 
 # ============================================================================

@@ -484,6 +484,7 @@ class TestCommandBuilders(unittest.TestCase):
             temperature=0.1,
             top_k=5,
             pseudo_log_every=50,
+            max_fg_fallback_tokens=4,
         )
         self.scripts = {
             stage: Path(f"/fake/code/{name}")
@@ -1276,6 +1277,7 @@ class TestRunnerDryRunArgumentsSupported(unittest.TestCase):
             cluster_max_iter=25,
             bg_ring_width_tokens=1,
             max_global_non_bg_coverage=0.10,
+            max_fg_fallback_tokens=4,
         )
         self.scripts = {
             "split": Path("/fake/01.py"),
@@ -1859,6 +1861,176 @@ class TestDryRunSafety(unittest.TestCase):
         )
         self.assertIn("split_path", paths)
         self.assertIn("support_path", paths)
+
+
+# ============================================================================
+# V. FG Fallback Runner Tests
+# ============================================================================
+
+class TestFgFallbackRunner(unittest.TestCase):
+    """Runner must pass --max_fg_fallback_tokens to 02 and validate it."""
+
+    def setUp(self):
+        self.args = argparse.Namespace(
+            python="python",
+            processed_root=Path("/fake/processed"),
+            base_checkpoint=Path("/fake/checkpoint.pth"),
+            medsam_ft_root=Path("/fake/ft"),
+            fold="fold_0",
+            device="cuda",
+            seed=2026,
+            kmax_shape=5,
+            shape_size=64,
+            cluster_max_iter=25,
+            bg_ring_width_tokens=1,
+            max_global_non_bg_coverage=0.10,
+            epochs=1,
+            max_steps=0,
+            lr=1e-5,
+            weight_decay=0.01,
+            ema_decay=0.99,
+            max_grad_norm=1.0,
+            train_log_every=10,
+            pseudo_max_samples=0,
+            alpha=0.5, beta=0.3, gamma=0.2,
+            tau_low=0.1, tau_high=0.5,
+            temperature=0.1, top_k=5,
+            pseudo_log_every=10,
+            max_fg_fallback_tokens=4,
+        )
+        self.scripts = {
+            "template": Path("/fake/02_build_support_template.py"),
+        }
+
+    def test_default_max_fg_fallback_tokens_is_4(self):
+        parser = runner.build_parser()
+        defaults = {
+            action.dest: action.default
+            for action in parser._actions
+        }
+        self.assertEqual(defaults.get("max_fg_fallback_tokens"), 4)
+
+    def test_build_template_command_includes_max_fg_fallback_tokens(self):
+        """build_template_command passes --max_fg_fallback_tokens."""
+        self.args.max_fg_fallback_tokens = 3
+        cmd = runner.build_template_command(
+            self.args, self.scripts, "cvc_clinicdb", "test_m", "r00_full5",
+            stage_overwrite=False,
+        )
+        self.assertIn("--max_fg_fallback_tokens", cmd)
+        idx = cmd.index("--max_fg_fallback_tokens")
+        self.assertEqual(cmd[idx + 1], "3")
+
+    def test_validate_numeric_rejects_zero(self):
+        """validate_numeric_args rejects --max_fg_fallback_tokens 0."""
+        self.args.max_fg_fallback_tokens = 0
+        with self.assertRaises(ValueError):
+            runner.validate_numeric_args(self.args)
+
+    def test_validate_numeric_rejects_negative(self):
+        """validate_numeric_args rejects negative max_fg_fallback_tokens."""
+        self.args.max_fg_fallback_tokens = -1
+        with self.assertRaises(ValueError):
+            runner.validate_numeric_args(self.args)
+
+
+class TestValidatorSchemaV2(unittest.TestCase):
+    """08 --strict must require fallback fields on v2 stats."""
+
+    def setUp(self):
+        import importlib
+        import tempfile
+        self._tmpdir = Path(tempfile.mkdtemp(prefix="test_vs2_"))
+        self.v08 = importlib.import_module(
+            "idea1_iterclean_bank_adaptshape.08_validate_round_outputs"
+        )
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(str(self._tmpdir), ignore_errors=True)
+
+    def _make_npz(self, path):
+        import zipfile
+        import io as _io_npz
+        import numpy as np
+        arrays = {
+            "class_ids": np.array([1], dtype=np.int64),
+            "feature_dim": np.array(768, dtype=np.int64),
+            "shape_size": np.array([64, 64], dtype=np.int64),
+            "method": np.array("test"),
+            "round_tag": np.array("r00_full5"),
+            "run_id": np.array("test_r00_full5"),
+            "bank_fg_c1": np.ones((10, 768), dtype=np.float32),
+            "bank_bg_c1": np.ones((10, 768), dtype=np.float32),
+            "shape_templates_c1": np.ones((2, 64, 64), dtype=np.float32),
+            "shape_semantic_centers_c1": np.ones((2, 768), dtype=np.float32),
+            "shape_cluster_instance_counts_c1": np.array([5, 5], dtype=np.int64),
+            "shape_cluster_support_counts_c1": np.array([5, 5], dtype=np.int64),
+        }
+        with zipfile.ZipFile(str(path), "w", zipfile.ZIP_DEFLATED) as zf:
+            for name, arr in arrays.items():
+                buf = _io_npz.BytesIO()
+                np.save(buf, arr, allow_pickle=False)
+                zf.writestr(name + ".npy", buf.getvalue())
+
+    def test_v2_stats_with_all_fields_pass_strict(self):
+        """v2 stats with complete fallback fields pass strict validation."""
+        npz_path = self._tmpdir / "test.npz"
+        stats_path = self._tmpdir / "stats.json"
+        self._make_npz(npz_path)
+        stats = {
+            "support_stats_schema_version": 2,
+            "bg_ring_width_tokens": 1,
+            "fg_coverage_threshold": 0.90,
+            "max_global_non_bg_coverage": 0.10,
+            "zero_bg_instance_count": 0,
+            "instances_with_bg_tokens": 10,
+            "instances_without_bg_tokens": 0,
+            "total_bg_ring_candidate_tokens": 500,
+            "total_valid_global_bg_tokens": 200,
+            "bg_ring_valid_ratio": 0.4,
+            "global_non_bg_coverage_ring_min": 0.0,
+            "global_non_bg_coverage_ring_mean": 0.05,
+            "global_non_bg_coverage_ring_max": 0.10,
+            "fg_primary_coverage_threshold": 0.90,
+            "max_fg_fallback_tokens": 4,
+            "instances_with_primary_fg": 8,
+            "instances_with_fallback_fg": 2,
+            "fg_fallback_instance_count": 2,
+            "fg_fallback_token_count": 5,
+            "fg_fallback_coverage_min": 0.05,
+            "fg_fallback_coverage_mean": 0.20,
+            "fg_fallback_coverage_max": 0.50,
+        }
+        stats_path.write_text(json.dumps(stats))
+        paths = {"support_path": npz_path, "support_stats_path": stats_path}
+        errors = self.v08.validate_template(paths, strict=True)
+        self.assertEqual(errors, [])
+
+    def test_v2_stats_missing_fallback_fields_fails_strict(self):
+        """v2 stats without fallback fields fail strict validation."""
+        npz_path = self._tmpdir / "test.npz"
+        stats_path = self._tmpdir / "stats.json"
+        self._make_npz(npz_path)
+        stats = {
+            "support_stats_schema_version": 2,
+            "bg_ring_width_tokens": 1,
+            "fg_coverage_threshold": 0.90,
+            "max_global_non_bg_coverage": 0.10,
+            "zero_bg_instance_count": 0,
+            "instances_with_bg_tokens": 10,
+            "instances_without_bg_tokens": 0,
+            "total_bg_ring_candidate_tokens": 500,
+            "total_valid_global_bg_tokens": 200,
+            "bg_ring_valid_ratio": 0.4,
+            "global_non_bg_coverage_ring_min": 0.0,
+            "global_non_bg_coverage_ring_mean": 0.05,
+            "global_non_bg_coverage_ring_max": 0.10,
+        }
+        stats_path.write_text(json.dumps(stats))
+        paths = {"support_path": npz_path, "support_stats_path": stats_path}
+        errors = self.v08.validate_template(paths, strict=True)
+        self.assertTrue(len(errors) > 0)
 
 
 # ============================================================================

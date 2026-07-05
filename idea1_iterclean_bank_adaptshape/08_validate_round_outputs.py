@@ -273,6 +273,119 @@ def validate_template(paths: dict[str, Path], strict: bool) -> list[str]:
                     if field not in stats:
                         errors.append(f"Support stats missing field: {field}")
 
+                # Schema-aware fallback validation.
+                schema_v = stats.get("support_stats_schema_version")
+                if schema_v is None or schema_v == 1:
+                    # v1: fallback fields optional.
+                    for fb_field in ("fg_fallback_instance_count", "fg_fallback_token_count"):
+                        fb_val = stats.get(fb_field)
+                        if fb_val is not None and (
+                            not isinstance(fb_val, (int, float)) or fb_val < 0
+                        ):
+                            errors.append(
+                                f"Support stats: {fb_field} must be >= 0, got {fb_val}"
+                            )
+                elif schema_v == 2:
+                    # v2: all fallback fields required.
+                    for fb_field in (
+                        "fg_primary_coverage_threshold",
+                        "max_fg_fallback_tokens",
+                        "instances_with_primary_fg",
+                        "instances_with_fallback_fg",
+                        "fg_fallback_instance_count",
+                        "fg_fallback_token_count",
+                        "fg_fallback_coverage_min",
+                        "fg_fallback_coverage_mean",
+                        "fg_fallback_coverage_max",
+                    ):
+                        if fb_field not in stats:
+                            errors.append(
+                                f"Support stats v2 missing field: {fb_field}"
+                            )
+                    # Type and range checks.
+                    for int_field in (
+                        "instances_with_primary_fg",
+                        "instances_with_fallback_fg",
+                        "fg_fallback_instance_count",
+                        "fg_fallback_token_count",
+                    ):
+                        val = stats.get(int_field)
+                        if val is not None and (
+                            not isinstance(val, (int, float))
+                            or int(val) != val
+                            or val < 0
+                        ):
+                            errors.append(
+                                f"Support stats v2: {int_field} must be "
+                                f"non-negative int, got {val}"
+                            )
+                    mfft = stats.get("max_fg_fallback_tokens")
+                    if mfft is not None and (
+                        not isinstance(mfft, int) or mfft < 1
+                    ):
+                        errors.append(
+                            f"Support stats v2: max_fg_fallback_tokens "
+                            f"must be int >= 1, got {mfft}"
+                        )
+                    fpct = stats.get("fg_primary_coverage_threshold")
+                    if fpct is None or not isinstance(fpct, (int, float)) or fpct <= 0:
+                        errors.append(
+                            f"Support stats v2: fg_primary_coverage_threshold "
+                            f"must be float > 0, got {fpct}"
+                        )
+                    # Count invariants.
+                    iwfb = stats.get("instances_with_fallback_fg")
+                    fbfi = stats.get("fg_fallback_instance_count")
+                    if iwfb is not None and fbfi is not None and iwfb != fbfi:
+                        errors.append(
+                            f"Support stats v2: instances_with_fallback_fg "
+                            f"({iwfb}) != fg_fallback_instance_count "
+                            f"({fbfi})"
+                        )
+                    iwpf = stats.get("instances_with_primary_fg")
+                    total_inst = stats.get("num_full_instances")
+                    if (iwpf is not None and iwfb is not None
+                            and total_inst is not None
+                            and iwpf + iwfb != total_inst):
+                        errors.append(
+                            f"Support stats v2: instances_with_primary_fg "
+                            f"({iwpf}) + instances_with_fallback_fg "
+                            f"({iwfb}) != num_full_instances "
+                            f"({total_inst})"
+                        )
+                    # NaN checks for coverage min/mean/max.
+                    for cov_field in (
+                        "fg_fallback_coverage_min",
+                        "fg_fallback_coverage_mean",
+                        "fg_fallback_coverage_max",
+                    ):
+                        cov_val = stats.get(cov_field)
+                        if cov_val is not None:
+                            if isinstance(cov_val, float) and cov_val != cov_val:
+                                errors.append(
+                                    f"Support stats v2: {cov_field} is NaN"
+                                )
+                            elif cov_val == float("inf") or cov_val == float("-inf"):
+                                errors.append(
+                                    f"Support stats v2: {cov_field} is Inf"
+                                )
+                else:
+                    errors.append(
+                        f"Support stats: unknown "
+                        f"support_stats_schema_version={schema_v}"
+                    )
+
+                # max_fg_fallback_tokens: optional for v1, but if present must be >= 1.
+                if schema_v is None or schema_v == 1:
+                    mfft = stats.get("max_fg_fallback_tokens")
+                    if mfft is not None and (
+                        not isinstance(mfft, int) or mfft < 1
+                    ):
+                        errors.append(
+                            f"Support stats: max_fg_fallback_tokens "
+                            f"must be >= 1, got {mfft}"
+                        )
+
                 # Forbidden old fields.
                 for old_field in ("ring_expand_ratio", "bg_coverage_threshold"):
                     if old_field in stats:
@@ -297,6 +410,13 @@ def validate_template(paths: dict[str, Path], strict: bool) -> list[str]:
                 if ratio is not None and not (0.0 <= ratio <= 1.0):
                     errors.append(
                         f"Support stats: bg_ring_valid_ratio out of [0,1]: {ratio}"
+                    )
+
+                # max_fg_fallback_tokens: optional, but if present must be >= 1.
+                mfft = stats.get("max_fg_fallback_tokens")
+                if mfft is not None and (not isinstance(mfft, int) or mfft < 1):
+                    errors.append(
+                        f"Support stats: max_fg_fallback_tokens must be >= 1, got {mfft}"
                     )
 
                 _ok(f"Support stats: {stats_path}")

@@ -848,23 +848,25 @@ class TestParseTrainEntries(unittest.TestCase):
 
     # -- missing instances -> ValueError -------------------------------------
 
-    def test_empty_instances_raises_ValueError(self):
-        """A prompt entry with empty instances list must raise ValueError."""
+    def test_empty_instances_skipped(self):
+        """A prompt entry with empty instances list is skipped (not an error)."""
         manifest = self._make_manifest()
         prompts = {"case001.npy": {"instances": []}}
         split_records = [{"slice_name": "case001.npy", "label_mode": "full", "case_id": "c1"}]
-        with self.assertRaises(ValueError,
-                               msg="Empty instances must raise ValueError"):
-            t03.parse_train_entries(self._tmpdir, manifest, prompts, split_records)
+        entries = t03.parse_train_entries(self._tmpdir, manifest, prompts, split_records)
+        full_entries = [e for e in entries if e["label_mode"] == "full"]
+        self.assertEqual(len(full_entries), 0,
+                         msg="Empty instances should be skipped")
 
-    def test_missing_instances_key_raises_ValueError(self):
-        """A prompt entry without 'instances' key must raise ValueError."""
+    def test_missing_instances_key_skipped(self):
+        """A prompt entry without 'instances' key is skipped (not an error)."""
         manifest = self._make_manifest()
         prompts = {"case001.npy": {}}
         split_records = [{"slice_name": "case001.npy", "label_mode": "full", "case_id": "c1"}]
-        with self.assertRaises(ValueError,
-                               msg="Missing 'instances' key must raise ValueError"):
-            t03.parse_train_entries(self._tmpdir, manifest, prompts, split_records)
+        entries = t03.parse_train_entries(self._tmpdir, manifest, prompts, split_records)
+        full_entries = [e for e in entries if e["label_mode"] == "full"]
+        self.assertEqual(len(full_entries), 0,
+                         msg="Missing 'instances' key should be skipped")
 
     # -- bbox extraction -----------------------------------------------------
 
