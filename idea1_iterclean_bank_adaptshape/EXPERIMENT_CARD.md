@@ -53,10 +53,11 @@ Round 1: External Split from Selection → [Bank + Shapes]  → Train Decoder �
 ### Training (03)
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| epochs | 100 | Training epochs |
-| lr | 1e-4 | Learning rate |
+| epochs | 1 | Training epochs (full pass through training data) |
+| max_steps | 0 | Max training steps (0 = unlimited, train full epoch). Smoke uses 5 (Round 0) or 2 (Round 1+) |
+| lr | 1e-5 | Learning rate |
 | weight_decay | 0.01 | Weight decay |
-| ema_decay | 0.999 | EMA decay rate |
+| ema_decay | 0.99 | EMA decay rate |
 | max_grad_norm | 1.0 | Gradient clipping |
 
 ### Pseudo-Label Fusion (04)

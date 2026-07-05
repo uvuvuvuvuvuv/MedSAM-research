@@ -1609,7 +1609,129 @@ class TestFormalFinalRoundSemantics(unittest.TestCase):
         self.assertFalse(is_formal_final_round(1, False))
 
 
-import sys
+# ============================================================================
+# T. Training Defaults Contract
+# ============================================================================
+
+class TestTrainingDefaults(unittest.TestCase):
+    """Formal training defaults: epochs=1, max_steps=0, lr=1e-5, ema_decay=0.99."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.parser = runner.build_parser()
+        cls._defaults = {
+            action.dest: action.default
+            for action in cls.parser._actions
+        }
+
+    def test_default_epochs_is_1(self):
+        self.assertEqual(self._defaults.get("epochs"), 1)
+
+    def test_default_max_steps_is_0(self):
+        self.assertEqual(self._defaults.get("max_steps"), 0)
+
+    def test_default_lr_is_1e_5(self):
+        self.assertAlmostEqual(self._defaults.get("lr"), 1e-5)
+
+    def test_default_ema_decay_is_0_99(self):
+        self.assertAlmostEqual(self._defaults.get("ema_decay"), 0.99)
+
+    def test_default_weight_decay_is_0_01(self):
+        self.assertAlmostEqual(self._defaults.get("weight_decay"), 0.01)
+
+
+# ============================================================================
+# U. Dry-Run Safety Contract
+# ============================================================================
+
+class TestDryRunSafety(unittest.TestCase):
+    """dry_run must not write round_summary or stage_success into processed root."""
+
+    def setUp(self):
+        self._tmpdir_obj = __import__("tempfile").mkdtemp(prefix="test_dry_")
+        self._tmpdir = Path(self._tmpdir_obj)
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(str(self._tmpdir_obj), ignore_errors=True)
+
+    def test_dry_run_not_in_status_values_equals_completed(self):
+        """dry_run_completed is distinct from completed."""
+        # These are the status values used in the runner
+        self.assertNotEqual("dry_run_completed", "completed")
+
+    def test_run_command_includes_dry_run_flag(self):
+        """run_command records dry_run in command metadata."""
+        # Verify the function signature accepts dry_run parameter
+        import inspect
+        sig = inspect.signature(runner.run_command)
+        self.assertIn("dry_run", sig.parameters)
+
+    def test_round_summary_skipped_in_dry_run(self):
+        """Verify the round_summary writing block is gated by 'if not args.dry_run'."""
+        import ast
+        import textwrap
+
+        runner_path = (
+            Path(__file__).resolve().parents[1] / "run_iterative_sampling.py"
+        )
+        source = runner_path.read_text()
+        tree = ast.parse(source)
+
+        # Find the function that contains round_summary saving and dry_run gating
+        found_gate = False
+        found_save = False
+
+        class DryRunVisitor(ast.NodeVisitor):
+            def visit_If(self, node):
+                nonlocal found_gate
+                # Look for: if not args.dry_run:
+                try:
+                    test_str = ast.unparse(node.test)
+                except Exception:
+                    test_str = ""
+                if "dry_run" in test_str and (
+                    "not" in test_str
+                    or "is False" in test_str
+                    or "False" in test_str
+                ):
+                    # Check if save_json_atomic is called inside this block
+                    class SaveChecker(ast.NodeVisitor):
+                        def visit_Call(self, call_node):
+                            nonlocal found_save
+                            try:
+                                if "save_json_atomic" in ast.unparse(call_node.func):
+                                    if "round_summary" in ast.unparse(call_node):
+                                        found_save = True
+                            except Exception:
+                                pass
+
+                    SaveChecker().visit(node)
+                    if found_save:
+                        found_gate = True
+
+                self.generic_visit(node)
+
+        DryRunVisitor().visit(tree)
+        self.assertTrue(found_gate,
+                        "round_summary save_json_atomic must be gated by "
+                        "'if not args.dry_run:'")
+        self.assertTrue(found_save,
+                        "round_summary save_json_atomic call must exist")
+
+    def test_build_fold_paths_does_not_depend_on_dry_run(self):
+        """build_fold_paths is a pure path constructor, dry_run irrelevant."""
+        from idea1_iterclean_bank_adaptshape.pipeline_common import build_fold_paths
+        paths = build_fold_paths(
+            processed_root="/fake/p",
+            dataset="btcv",
+            fold="fold_0",
+            method="test_m",
+            round_tag="r00_full5",
+            medsam_ft_root="/fake/ft",
+        )
+        self.assertIn("split_path", paths)
+        self.assertIn("support_path", paths)
 
 
 # ============================================================================

@@ -2312,30 +2312,32 @@ def run_pipeline(
                         ),
                     )
 
-                # Write round summary
-                is_final_round = is_formal_final_round(round_id, is_3d)
-                round_paths = round_output_paths(
-                    args, dataset, args.method, round_tag,
-                )
-                round_summary = {
-                    "dataset": dataset,
-                    "fold": args.fold,
-                    "method": args.method,
-                    "round_id": round_id,
-                    "round_tag": round_tag,
-                    "full_count": full_count,
-                    "is_final_round": is_final_round,
-                    "select_required": not is_final_round,
-                    "select_status": (
-                        "not_required"
-                        if is_final_round
-                        else "completed"
-                    ),
-                    "completed_at": utc_now(),
-                }
-                save_json_atomic(
-                    round_summary, round_paths["round_summary"],
-                )
+                # Write round summary (real runs only; dry-run must not
+                # write into processed root or medsam_ft_root).
+                if not args.dry_run:
+                    is_final_round = is_formal_final_round(round_id, is_3d)
+                    round_paths = round_output_paths(
+                        args, dataset, args.method, round_tag,
+                    )
+                    round_summary = {
+                        "dataset": dataset,
+                        "fold": args.fold,
+                        "method": args.method,
+                        "round_id": round_id,
+                        "round_tag": round_tag,
+                        "full_count": full_count,
+                        "is_final_round": is_final_round,
+                        "select_required": not is_final_round,
+                        "select_status": (
+                            "not_required"
+                            if is_final_round
+                            else "completed"
+                        ),
+                        "completed_at": utc_now(),
+                    }
+                    save_json_atomic(
+                        round_summary, round_paths["round_summary"],
+                    )
 
                 if args.stop_after == "round":
                     state["status"] = "stopped_after_round"
