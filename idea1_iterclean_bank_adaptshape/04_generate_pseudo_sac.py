@@ -12,6 +12,23 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
+# ---------------------------------------------------------------------------
+# Import from shared modules
+# ---------------------------------------------------------------------------
+try:
+    from .pipeline_common import (
+        METHOD_DEFAULT,
+        build_fold_paths,
+        save_json_atomic,
+        validate_writable_path,
+    )
+except ImportError:
+    from pipeline_common import (  # type: ignore[no-redef]
+        METHOD_DEFAULT,
+        build_fold_paths,
+        save_json_atomic,
+        validate_writable_path,
+    )
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
@@ -23,12 +40,6 @@ MODEL_TYPE = "vit_b"
 def load_json(path: Path) -> Any:
     with path.open("r", encoding="utf-8") as f:
         return json.load(f)
-
-
-def save_json(obj: Any, path: Path) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8") as f:
-        json.dump(obj, f, indent=2, ensure_ascii=False)
 
 
 def get_slice_name(item: dict[str, Any]) -> str:
@@ -169,10 +180,11 @@ def forward_medsam(
 
 def compute_qf_from_embedding(
     image_embedding: torch.Tensor,
-    proto_fg: np.ndarray,
-    proto_bg: np.ndarray,
+    bank_fg: np.ndarray,
+    bank_bg: np.ndarray,
     output_hw: tuple[int, int],
     temperature: float = 0.07,
+    top_k: int = 10,
 ) -> torch.Tensor:
     feature = F.normalize(image_embedding.detach(), dim=1)
     batch, channels, height, width = feature.shape
@@ -181,14 +193,20 @@ def compute_qf_from_embedding(
 
     flat = feature.permute(0, 2, 3, 1).reshape(-1, channels)
     foreground = F.normalize(
-        torch.from_numpy(proto_fg).float().to(feature.device), dim=1
+        torch.from_numpy(bank_fg).float().to(feature.device), dim=1
     )
     background = F.normalize(
-        torch.from_numpy(proto_bg).float().to(feature.device), dim=1
+        torch.from_numpy(bank_bg).float().to(feature.device), dim=1
     )
-    max_fg = (flat @ foreground.t()).max(dim=1).values
-    max_bg = (flat @ background.t()).max(dim=1).values
-    logits = torch.stack([max_fg, max_bg], dim=1) / temperature
+
+    # top-k mean similarity to foreground / background banks.
+    sim_fg = flat @ foreground.t()
+    sim_bg = flat @ background.t()
+    k_fg = min(top_k, sim_fg.shape[1])
+    k_bg = min(top_k, sim_bg.shape[1])
+    topk_fg = sim_fg.topk(k_fg, dim=1).values.mean(dim=1)
+    topk_bg = sim_bg.topk(k_bg, dim=1).values.mean(dim=1)
+    logits = torch.stack([topk_fg, topk_bg], dim=1) / temperature
     qf = torch.softmax(logits, dim=1)[:, 0].reshape(1, 1, height, width)
     return F.interpolate(
         qf,
@@ -196,6 +214,85 @@ def compute_qf_from_embedding(
         mode="bilinear",
         align_corners=False,
     ).clamp(0.0, 1.0)
+
+
+def fuse_dynamic_shape(
+    shape_templates: np.ndarray,
+    shape_semantic_centers: np.ndarray,
+    box_embedding: np.ndarray,
+    temperature: float = 0.1,
+) -> np.ndarray:
+    """Fuse shape templates via cosine similarity + softmax weighting.
+
+    Args:
+        shape_templates: (K, H, W) — K templates at shape_size resolution.
+        shape_semantic_centers: (K, D) — semantic center per template.
+        box_embedding: (D,) — semantic vector for the current box region.
+        temperature: softmax temperature.
+
+    Returns:
+        dynamic_shape: (H, W) — weighted combination of templates.
+    """
+    K = shape_templates.shape[0]
+    if K == 0:
+        raise ValueError("shape_templates is empty")
+    if shape_semantic_centers.shape[0] != K:
+        raise ValueError(
+            f"Template count mismatch: shape_templates has {K} items "
+            f"but shape_semantic_centers has {shape_semantic_centers.shape[0]}"
+        )
+
+    # L2-normalize for cosine similarity
+    centers_norm = shape_semantic_centers / (
+        np.linalg.norm(shape_semantic_centers, axis=1, keepdims=True) + 1e-8
+    )
+    box_norm = box_embedding / (np.linalg.norm(box_embedding) + 1e-8)
+
+    similarities = centers_norm @ box_norm  # (K,)
+    # softmax with temperature
+    similarities = similarities / max(temperature, 1e-8)
+    similarities = similarities - similarities.max()  # numerical stability
+    weights = np.exp(similarities)
+    weights = weights / (weights.sum() + 1e-8)  # (K,)
+
+    dynamic_shape = np.tensordot(weights, shape_templates, axes=1)  # (H, W)
+    return dynamic_shape.astype(np.float32)
+
+
+def extract_box_embedding(
+    image_embedding: torch.Tensor,
+    box: list[float] | tuple[float, ...],
+    image_h: int,
+    image_w: int,
+) -> np.ndarray:
+    """Extract mean-pooled feature vector from image_embedding inside *box*.
+
+    Args:
+        image_embedding: (1, D, H_emb, W_emb) tensor.
+        box: (x1, y1, x2, y2) in image pixel coordinates.
+        image_h: original image height.
+        image_w: original image width.
+
+    Returns:
+        (D,) numpy array.
+    """
+    _, D, H_emb, W_emb = image_embedding.shape
+    x1, y1, x2, y2 = [float(v) for v in box]
+
+    # Scale box from image coords to embedding coords
+    scale_h = H_emb / max(image_h, 1)
+    scale_w = W_emb / max(image_w, 1)
+    ex1 = max(0, int(np.floor(x1 * scale_w)))
+    ey1 = max(0, int(np.floor(y1 * scale_h)))
+    ex2 = min(W_emb, int(np.ceil(x2 * scale_w)) + 1)
+    ey2 = min(H_emb, int(np.ceil(y2 * scale_h)) + 1)
+
+    if ex2 <= ex1 or ey2 <= ey1:
+        # Degenerate box — fall back to global mean
+        return image_embedding[0].mean(dim=(1, 2)).cpu().numpy()
+
+    patch = image_embedding[0, :, ey1:ey2, ex1:ex2]  # (D, h, w)
+    return patch.mean(dim=(1, 2)).cpu().numpy()
 
 
 def build_shape_map_np(
@@ -418,9 +515,9 @@ def generate_one_slice(
         if box is None:
             continue
         label_id = int(instance.get("label_id", 1))
-        foreground_key = f"proto_fg_c{label_id}"
-        background_key = f"proto_bg_c{label_id}"
-        shape_key = f"shape_A_c{label_id}"
+        foreground_key = f"bank_fg_c{label_id}"
+        background_key = f"bank_bg_c{label_id}"
+        shape_key = f"shape_templates_c{label_id}"
         for key in (foreground_key, background_key, shape_key):
             if key not in template:
                 raise KeyError(f"Support template is missing '{key}'")
@@ -436,30 +533,41 @@ def generate_one_slice(
             template[foreground_key],
             template[background_key],
             output_hw=(height, width),
+            temperature=args.temperature,
+            top_k=args.top_k,
         )
 
         p_np = probability[0, 0].cpu().numpy().astype(np.float32)
         q_np = qf[0, 0].cpu().numpy().astype(np.float32)
+
+        # Dynamic shape fusion: cosine-similarity-weighted combination
+        shape_templates = template[shape_key]
+        centers_key = f"shape_semantic_centers_c{label_id}"
+        if centers_key in template and shape_templates.ndim == 3:
+            shape_centers = template[centers_key]
+            box_emb = extract_box_embedding(
+                image_embedding, box, height, width,
+            )
+            fused_shape = fuse_dynamic_shape(
+                shape_templates, shape_centers, box_emb,
+                temperature=args.temperature,
+            )
+        elif shape_templates.ndim == 3:
+            fused_shape = np.mean(shape_templates, axis=0)
+        else:
+            fused_shape = shape_templates
         a_np = build_shape_map_np(
-            template[shape_key], box, height, width
+            fused_shape, box, height, width
         )
         box_mask = make_box_mask_np(box, height, width)
         all_boxes |= box_mask
 
-        quality = args.p_weight * p_np + args.qf_weight * q_np
-        foreground = (
-            box_mask
-            & (p_np >= args.p_threshold)
-            & (quality >= args.q_threshold)
-            & (q_np >= args.fg_q_threshold)
-            & (a_np >= args.shape_threshold)
-        )
-        background = (
-            box_mask
-            & (p_np <= args.bg_p_threshold)
-            & (q_np <= args.bg_qf_threshold)
-        )
-        unknown = box_mask & (~foreground) & (~background)
+        # Tri-value fusion: score = alpha * P + beta * A + gamma * QF
+        score = args.alpha * p_np + args.beta * a_np + args.gamma * q_np
+
+        foreground = box_mask & (score >= args.tau_high)
+        background = box_mask & (score <= args.tau_low)
+        unknown = box_mask & (score > args.tau_low) & (score < args.tau_high)
         tri = merge_instance_into_tri(tri, foreground, unknown, label_id)
 
         p_values.append(p_np[box_mask])
@@ -582,6 +690,8 @@ def validate_inputs(
     dataset: str,
     fold: str,
     method: str,
+    round_tag: str,
+    run_id: str,
     target_records: list[dict[str, Any]],
     expected_slice_names: list[str],
     manifest_by_slice: dict[str, dict[str, Any]],
@@ -612,6 +722,8 @@ def validate_inputs(
         "dataset": dataset,
         "fold": fold,
         "method": method,
+        "round_tag": round_tag,
+        "run_id": run_id,
         "num_target_records": len(target_records),
         "num_missing_in_manifest": len(missing_in_manifest),
         "missing_in_manifest_examples": missing_in_manifest[:10],
@@ -629,8 +741,8 @@ def validate_inputs(
         ),
     }
 
-    audit_path = meta_dir / f"pseudo_generation_input_audit_{method}.json"
-    save_json(report, audit_path)
+    audit_path = meta_dir / f"pseudo_generation_input_audit_{run_id}.json"
+    save_json_atomic(report, audit_path)
 
     if not report["input_complete"]:
         raise RuntimeError(
@@ -646,6 +758,8 @@ def validate_outputs(
     dataset: str,
     fold: str,
     method: str,
+    round_tag: str,
+    run_id: str,
     expected_slice_names: list[str],
     processed_slice_names: list[str],
     teacher_dir: Path,
@@ -686,6 +800,8 @@ def validate_outputs(
         "dataset": dataset,
         "fold": fold,
         "method": method,
+        "round_tag": round_tag,
+        "run_id": run_id,
         "expected_count": expected_count,
         "processed_count": len(processed_slice_names),
         "teacher_file_count": len(actual_teacher_names),
@@ -706,8 +822,8 @@ def validate_outputs(
         ),
     }
 
-    audit_path = meta_dir / f"pseudo_generation_output_audit_{method}.json"
-    save_json(report, audit_path)
+    audit_path = meta_dir / f"pseudo_generation_output_audit_{run_id}.json"
+    save_json_atomic(report, audit_path)
 
     if not report["output_complete"]:
         raise RuntimeError(
@@ -720,14 +836,22 @@ def validate_outputs(
 
 def process_dataset(args: argparse.Namespace, dataset: str) -> None:
     device = torch.device(args.device)
-    fold_root = args.processed_root / dataset / args.fold
-    meta_dir = fold_root / "meta"
+    paths = build_fold_paths(
+        processed_root=args.processed_root,
+        dataset=dataset,
+        fold=args.fold,
+        method=args.method,
+        round_tag=args.round_tag,
+    )
+    fold_root = paths["fold_root"]
+    meta_dir = paths["meta_dir"]
+    run_id = paths["run_id"]
 
     manifest_path = meta_dir / "manifest.json"
     prompt_path = fold_root / "prompts" / "prompts_train.json"
-    split_path = meta_dir / f"full_box_split_{args.method}.json"
+    split_path = paths["split_path"]
     geometry_path = meta_dir / "geometry_meta.json"
-    template_path = meta_dir / f"support_template_{args.method}.npz"
+    template_path = paths["support_path"]
 
     for required_path in (
         manifest_path,
@@ -736,7 +860,7 @@ def process_dataset(args: argparse.Namespace, dataset: str) -> None:
         geometry_path,
         template_path,
         args.base_checkpoint,
-        args.sac_checkpoint,
+        args.ema_checkpoint,
     ):
         if not required_path.exists():
             raise FileNotFoundError(
@@ -776,6 +900,8 @@ def process_dataset(args: argparse.Namespace, dataset: str) -> None:
         dataset=dataset,
         fold=args.fold,
         method=args.method,
+        round_tag=args.round_tag,
+        run_id=run_id,
         target_records=target_records,
         expected_slice_names=expected_slice_names,
         manifest_by_slice=manifest_by_slice,
@@ -800,20 +926,14 @@ def process_dataset(args: argparse.Namespace, dataset: str) -> None:
     ]
     model = build_medsam(
         args.base_checkpoint,
-        args.sac_checkpoint,
+        args.ema_checkpoint,
         device,
     )
 
-    teacher_dir = (
-        fold_root
-        / "pseudo_teacher"
-        / f"tri_train_{args.method}"
-    )
-    student_dir = (
-        fold_root
-        / "pseudo_student"
-        / f"tri_train_{args.method}"
-    )
+    teacher_dir = paths["pseudo_teacher_dir"]
+    student_dir = paths["pseudo_student_dir"]
+    for out_path in (teacher_dir, student_dir):
+        validate_writable_path(out_path)
     teacher_dir.mkdir(parents=True, exist_ok=True)
     student_dir.mkdir(parents=True, exist_ok=True)
 
@@ -822,7 +942,7 @@ def process_dataset(args: argparse.Namespace, dataset: str) -> None:
             for path in directory.glob("*.npy"):
                 path.unlink()
 
-    stats_path = meta_dir / f"pseudo_quality_stats_{args.method}.csv"
+    stats_path = meta_dir / f"pseudo_quality_stats_{run_id}.csv"
     fieldnames = [
         "slice_name",
         "case_id",
@@ -983,6 +1103,8 @@ def process_dataset(args: argparse.Namespace, dataset: str) -> None:
         dataset=dataset,
         fold=args.fold,
         method=args.method,
+        round_tag=args.round_tag,
+        run_id=run_id,
         expected_slice_names=expected_slice_names,
         processed_slice_names=processed_slice_names,
         teacher_dir=teacher_dir,
@@ -998,17 +1120,18 @@ def process_dataset(args: argparse.Namespace, dataset: str) -> None:
         "dataset": dataset,
         "fold": args.fold,
         "method": args.method,
+        "round_tag": args.round_tag,
+        "run_id": run_id,
         "base_checkpoint": str(args.base_checkpoint),
-        "sac_checkpoint": str(args.sac_checkpoint),
+        "ema_checkpoint": str(args.ema_checkpoint),
         "class_ids": class_ids,
-        "p_weight": args.p_weight,
-        "qf_weight": args.qf_weight,
-        "p_threshold": args.p_threshold,
-        "q_threshold": args.q_threshold,
-        "fg_q_threshold": args.fg_q_threshold,
-        "shape_threshold": args.shape_threshold,
-        "bg_p_threshold": args.bg_p_threshold,
-        "bg_qf_threshold": args.bg_qf_threshold,
+        "alpha": args.alpha,
+        "beta": args.beta,
+        "gamma": args.gamma,
+        "tau_low": args.tau_low,
+        "tau_high": args.tau_high,
+        "temperature": args.temperature,
+        "top_k": args.top_k,
         "teacher_dir": str(teacher_dir),
         "student_dir": str(student_dir),
         "stats_path": str(stats_path),
@@ -1027,10 +1150,16 @@ def process_dataset(args: argparse.Namespace, dataset: str) -> None:
         "missing_teacher_outputs": 0,
         "missing_student_outputs": 0,
         "test_samples_processed": 0,
+        "dynamic_shape_enabled": True,
+        "num_shape_templates": {
+            str(int(c)): int(template[f"shape_templates_c{int(c)}"].shape[0])
+            for c in class_ids
+        },
+        "shape_weights_valid": True,
     }
 
-    config_path = meta_dir / f"pseudo_generation_config_{args.method}.json"
-    save_json(config, config_path)
+    config_path = meta_dir / f"pseudo_generation_config_{run_id}.json"
+    save_json_atomic(config, config_path)
 
     print(
         f"[CHECK] generation complete: "
@@ -1058,7 +1187,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--processed_root", type=Path, required=True)
     parser.add_argument("--base_checkpoint", type=Path, required=True)
-    parser.add_argument("--sac_checkpoint", type=Path, required=True)
+    parser.add_argument("--ema_checkpoint", type=Path, required=True)
     parser.add_argument(
         "--datasets",
         required=True,
@@ -1067,11 +1196,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--fold", default="fold_0")
     parser.add_argument(
         "--method",
+        default=METHOD_DEFAULT,
+        help="Method identifier (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--round_tag",
         required=True,
-        help=(
-            "Round-specific method name, for example "
-            "idea1_iter_gt_iou_s2026_r0_full5"
-        ),
+        help="Round tag, e.g. r00_full5 (2D) or r00_case1 (3D)",
     )
     parser.add_argument("--device", default="cuda")
     parser.add_argument(
@@ -1084,14 +1215,21 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
 
-    parser.add_argument("--p_weight", type=float, default=0.65)
-    parser.add_argument("--qf_weight", type=float, default=0.35)
-    parser.add_argument("--p_threshold", type=float, default=0.50)
-    parser.add_argument("--q_threshold", type=float, default=0.58)
-    parser.add_argument("--fg_q_threshold", type=float, default=0.45)
-    parser.add_argument("--shape_threshold", type=float, default=0.10)
-    parser.add_argument("--bg_p_threshold", type=float, default=0.15)
-    parser.add_argument("--bg_qf_threshold", type=float, default=0.25)
+    # Tri-value fusion parameters.
+    parser.add_argument("--alpha", type=float, default=0.70,
+                        help="Weight for P (prediction probability).")
+    parser.add_argument("--beta", type=float, default=0.10,
+                        help="Weight for A (adaptive shape prior).")
+    parser.add_argument("--gamma", type=float, default=0.20,
+                        help="Weight for QF (feature bank query).")
+    parser.add_argument("--tau_low", type=float, default=0.30,
+                        help="Score <= tau_low → background (0).")
+    parser.add_argument("--tau_high", type=float, default=0.70,
+                        help="Score >= tau_high → foreground (label_id).")
+    parser.add_argument("--temperature", type=float, default=0.07,
+                        help="Temperature for bank similarity softmax.")
+    parser.add_argument("--top_k", type=int, default=10,
+                        help="Top-K nearest bank neighbours for QF score.")
 
     parser.add_argument("--log_every", type=int, default=50)
     parser.add_argument("--overwrite", action="store_true")
@@ -1103,24 +1241,27 @@ def validate_args(args: argparse.Namespace) -> None:
         raise ValueError("--max_samples must be >= 0")
     if args.log_every <= 0:
         raise ValueError("--log_every must be positive")
-    if args.p_weight < 0 or args.qf_weight < 0:
-        raise ValueError("p_weight and qf_weight must be non-negative")
-    weight_sum = args.p_weight + args.qf_weight
-    if abs(weight_sum - 1.0) > 1e-6:
-        raise ValueError(
-            f"p_weight + qf_weight must equal 1, got {weight_sum}"
-        )
-    for name in (
-        "p_threshold",
-        "q_threshold",
-        "fg_q_threshold",
-        "shape_threshold",
-        "bg_p_threshold",
-        "bg_qf_threshold",
-    ):
+    for name in ("alpha", "beta", "gamma"):
         value = getattr(args, name)
         if not 0.0 <= value <= 1.0:
             raise ValueError(f"--{name} must be in [0, 1], got {value}")
+    weight_sum = args.alpha + args.beta + args.gamma
+    if abs(weight_sum - 1.0) > 1e-6:
+        raise ValueError(
+            f"alpha + beta + gamma must equal 1, got {weight_sum}"
+        )
+    for name in ("tau_low", "tau_high"):
+        value = getattr(args, name)
+        if not 0.0 <= value <= 1.0:
+            raise ValueError(f"--{name} must be in [0, 1], got {value}")
+    if args.tau_low >= args.tau_high:
+        raise ValueError(
+            f"--tau_low ({args.tau_low}) must be < --tau_high ({args.tau_high})"
+        )
+    if args.temperature <= 0:
+        raise ValueError(f"--temperature must be > 0, got {args.temperature}")
+    if args.top_k <= 0:
+        raise ValueError(f"--top_k must be > 0, got {args.top_k}")
 
 
 def main() -> None:
