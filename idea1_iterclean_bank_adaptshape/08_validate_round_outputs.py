@@ -255,6 +255,50 @@ def validate_template(paths: dict[str, Path], strict: bool) -> list[str]:
             errors.append(f"Cannot read support stats: {exc}")
         else:
             if isinstance(stats, dict):
+                # Required new fields.
+                for field in (
+                    "bg_ring_width_tokens",
+                    "fg_coverage_threshold",
+                    "max_global_non_bg_coverage",
+                    "zero_bg_instance_count",
+                    "instances_with_bg_tokens",
+                    "instances_without_bg_tokens",
+                    "total_bg_ring_candidate_tokens",
+                    "total_valid_global_bg_tokens",
+                    "bg_ring_valid_ratio",
+                    "global_non_bg_coverage_ring_min",
+                    "global_non_bg_coverage_ring_mean",
+                    "global_non_bg_coverage_ring_max",
+                ):
+                    if field not in stats:
+                        errors.append(f"Support stats missing field: {field}")
+
+                # Forbidden old fields.
+                for old_field in ("ring_expand_ratio", "bg_coverage_threshold"):
+                    if old_field in stats:
+                        errors.append(
+                            f"Support stats contains forbidden old field: {old_field}"
+                        )
+
+                # Value checks.
+                if stats.get("bg_ring_width_tokens") != 1:
+                    errors.append(
+                        "Support stats: bg_ring_width_tokens must be 1, "
+                        f"got {stats.get('bg_ring_width_tokens')}"
+                    )
+                if abs(stats.get("max_global_non_bg_coverage", -1) - 0.10) > 0.001:
+                    errors.append(
+                        "Support stats: max_global_non_bg_coverage must be 0.10, "
+                        f"got {stats.get('max_global_non_bg_coverage')}"
+                    )
+
+                # bg_ring_valid_ratio must be in [0, 1].
+                ratio = stats.get("bg_ring_valid_ratio")
+                if ratio is not None and not (0.0 <= ratio <= 1.0):
+                    errors.append(
+                        f"Support stats: bg_ring_valid_ratio out of [0,1]: {ratio}"
+                    )
+
                 _ok(f"Support stats: {stats_path}")
     else:
         _ok("Support stats: (not present)")

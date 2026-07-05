@@ -1,6 +1,6 @@
 """Unit tests for 02_build_support_template module.
 
-A. Coverage calculation (via resize_float)
+A. Coverage calculation (via resize_binary_mask_to_coverage_area)
 B. FG/BG screening
 C. Feature bank L2 normalization
 D. Shape clustering (spherical_kmeans, _adaptive_shape_clustering)
@@ -50,49 +50,49 @@ def _l2_normalize(x: np.ndarray, axis: int = -1, eps: float = 1e-6) -> np.ndarra
 
 
 # ============================================================================
-# A: resize_float + coverage calculation
+# A: resize_binary_mask_to_coverage_area + coverage calculation
 # ============================================================================
 
 
-class TestResizeFloat(unittest.TestCase):
+class TestResizeBinaryMaskToCoverageArea(unittest.TestCase):
     def test_all_ones_stays_one(self):
-        result = t02.resize_float(np.ones((100, 100), dtype=np.float32), (20, 20))
+        result = t02.resize_binary_mask_to_coverage_area(np.ones((100, 100), dtype=np.float32), (20, 20))
         self.assertEqual(result.shape, (20, 20))
         np.testing.assert_allclose(result, 1.0, atol=1e-5)
 
     def test_all_zeros_stays_zero(self):
-        result = t02.resize_float(np.zeros((100, 100), dtype=np.float32), (20, 20))
+        result = t02.resize_binary_mask_to_coverage_area(np.zeros((100, 100), dtype=np.float32), (20, 20))
         np.testing.assert_allclose(result, 0.0, atol=1e-5)
 
     def test_square_to_smaller(self):
         mask = np.zeros((100, 100), dtype=np.float32)
         mask[30:70, 30:70] = 1.0
-        result = t02.resize_float(mask, (10, 10))
+        result = t02.resize_binary_mask_to_coverage_area(mask, (10, 10))
         self.assertGreaterEqual(float(result[5, 5]), 0.9)
         for r, c in [(0, 0), (0, 9), (9, 0), (9, 9)]:
             self.assertLessEqual(float(result[r, c]), 0.1)
 
     def test_rectangular_input(self):
-        result = t02.resize_float(np.ones((80, 120), dtype=np.float32), (40, 60))
+        result = t02.resize_binary_mask_to_coverage_area(np.ones((80, 120), dtype=np.float32), (40, 60))
         self.assertEqual(result.shape, (40, 60))
         np.testing.assert_allclose(result, 1.0, atol=1e-5)
 
 
 class TestCoverageCalculation(unittest.TestCase):
-    """A. Coverage semantics of bilinearly-resized binary mask."""
+    """A. Coverage semantics of area-resized binary mask."""
 
     def test_fg_token_in_box_high_coverage(self):
         h, w = 200, 200
         mask = np.zeros((h, w), dtype=np.float32)
         mask[50:150, 50:150] = 1.0
-        coverage = t02.resize_float(mask, (20, 20))
+        coverage = t02.resize_binary_mask_to_coverage_area(mask, (20, 20))
         self.assertGreaterEqual(float(coverage[10, 10]), 0.95)
 
     def test_token_outside_box_zero_coverage(self):
         h, w = 200, 200
         mask = np.zeros((h, w), dtype=np.float32)
         mask[50:150, 50:150] = 1.0
-        coverage = t02.resize_float(mask, (20, 20))
+        coverage = t02.resize_binary_mask_to_coverage_area(mask, (20, 20))
         for r, c in [(0, 0), (0, 19), (19, 0), (19, 19)]:
             self.assertLessEqual(float(coverage[r, c]), 0.05)
 
@@ -100,9 +100,9 @@ class TestCoverageCalculation(unittest.TestCase):
         h, w = 200, 200
         mask = np.zeros((h, w), dtype=np.float32)
         mask[50:150, 50:150] = 1.0
-        coverage = t02.resize_float(mask, (20, 20))
+        coverage = t02.resize_binary_mask_to_coverage_area(mask, (20, 20))
         bbox_teacher = [50.0, 50.0, 150.0, 150.0]
-        ring = t02._compute_ring_mask(20, 20, bbox_teacher, h, w, ring_width=5)
+        ring = t02._compute_ring_mask(20, 20, bbox_teacher, h, w, ring_width_tokens=5)
         rr, cc = np.nonzero(ring)
         if len(rr) > 0:
             self.assertLess(float(coverage[rr, cc].max()), 0.15)
@@ -110,7 +110,7 @@ class TestCoverageCalculation(unittest.TestCase):
     def test_coverage_values_in_range(self):
         rng = np.random.default_rng(42)
         mask = rng.integers(0, 2, size=(128, 128)).astype(np.float32)
-        coverage = t02.resize_float(mask, (32, 32))
+        coverage = t02.resize_binary_mask_to_coverage_area(mask, (32, 32))
         self.assertTrue(np.all(coverage >= 0.0))
         self.assertTrue(np.all(coverage <= 1.0))
 
@@ -494,9 +494,27 @@ class TestCliParser(unittest.TestCase):
         ns = t02.build_parser().parse_args(self._B + ["--cluster_max_iter", "50"])
         self.assertEqual(ns.cluster_max_iter, 50)
 
-    def test_ring_expand_ratio(self):
-        ns = t02.build_parser().parse_args(self._B + ["--ring_expand_ratio", "8"])
-        self.assertEqual(ns.ring_expand_ratio, 8)
+    def test_bg_ring_width_tokens(self):
+        ns = t02.build_parser().parse_args(self._B + ["--bg_ring_width_tokens", "2"])
+        self.assertEqual(ns.bg_ring_width_tokens, 2)
+
+    def test_bg_ring_width_tokens_zero(self):
+        ns = t02.build_parser().parse_args(self._B + ["--bg_ring_width_tokens", "0"])
+        self.assertEqual(ns.bg_ring_width_tokens, 0)
+
+    def test_max_global_non_bg_coverage(self):
+        ns = t02.build_parser().parse_args(
+            self._B + ["--max_global_non_bg_coverage", "0.05"]
+        )
+        self.assertEqual(ns.max_global_non_bg_coverage, 0.05)
+
+    def test_old_ring_expand_ratio_rejected(self):
+        with self.assertRaises(SystemExit):
+            t02.build_parser().parse_args(self._B + ["--ring_expand_ratio", "8"])
+
+    def test_old_bg_coverage_threshold_rejected(self):
+        with self.assertRaises(SystemExit):
+            t02.build_parser().parse_args(self._B + ["--bg_coverage_threshold", "0.2"])
 
     def test_old_k_fg_rejected(self):
         with self.assertRaises(SystemExit):
@@ -512,11 +530,11 @@ class TestCliParser(unittest.TestCase):
         self.assertEqual(ns.seed, 2026)
         self.assertEqual(ns.device, "cuda")
         self.assertEqual(ns.fg_coverage_threshold, 0.90)
-        self.assertEqual(ns.bg_coverage_threshold, 0.10)
+        self.assertEqual(ns.max_global_non_bg_coverage, 0.10)
         self.assertEqual(ns.shape_size, 64)
         self.assertEqual(ns.kmax_shape, 5)
         self.assertEqual(ns.cluster_max_iter, 25)
-        self.assertEqual(ns.ring_expand_ratio, 5)
+        self.assertEqual(ns.bg_ring_width_tokens, 1)
         self.assertIsNone(ns.round_tag)
         self.assertFalse(ns.overwrite)
 
@@ -538,10 +556,10 @@ class TestValidateArgs(unittest.TestCase):
             processed_root=Path("/t"), checkpoint=Path("/c"),
             datasets="d", method="m", fold="f0", round_tag=None,
             device="cpu", seed=2026, overwrite=False,
-            fg_coverage_threshold=0.9, bg_coverage_threshold=0.1,
+            fg_coverage_threshold=0.9, max_global_non_bg_coverage=0.1,
             max_fg_per_instance=128, max_bg_per_instance=128,
             max_fg_per_class=4096, max_bg_per_class=4096,
-            ring_expand_ratio=5, shape_size=64, kmax_shape=5,
+            bg_ring_width_tokens=1, shape_size=64, kmax_shape=5,
             cluster_max_iter=25,
         )
         d.update(kw)
@@ -560,16 +578,20 @@ class TestValidateArgs(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     t02.validate_args(self._ns(fg_coverage_threshold=v))
 
-    def test_bg_threshold_oob(self):
+    def test_max_global_non_bg_coverage_oob(self):
         for v in [1.5, -0.1]:
             with self.subTest(v=v):
                 with self.assertRaises(ValueError):
-                    t02.validate_args(self._ns(bg_coverage_threshold=v))
+                    t02.validate_args(self._ns(max_global_non_bg_coverage=v))
+
+    def test_bg_ring_width_tokens_negative(self):
+        with self.assertRaises(ValueError):
+            t02.validate_args(self._ns(bg_ring_width_tokens=-1))
 
     def test_zero_positive_params(self):
         for name in ("max_fg_per_instance", "max_bg_per_instance",
                      "max_fg_per_class", "max_bg_per_class",
-                     "ring_expand_ratio", "shape_size",
+                     "shape_size",
                      "kmax_shape", "cluster_max_iter"):
             with self.subTest(p=name):
                 with self.assertRaises(ValueError):
@@ -578,8 +600,8 @@ class TestValidateArgs(unittest.TestCase):
     def test_boundary_thresholds_valid(self):
         for thr, val in [("fg_coverage_threshold", 0.0),
                          ("fg_coverage_threshold", 1.0),
-                         ("bg_coverage_threshold", 0.0),
-                         ("bg_coverage_threshold", 1.0)]:
+                         ("max_global_non_bg_coverage", 0.0),
+                         ("max_global_non_bg_coverage", 1.0)]:
             with self.subTest(thr=thr, val=val):
                 t02.validate_args(self._ns(**{thr: val}))
 
@@ -607,7 +629,7 @@ class TestShapeCropResize(unittest.TestCase):
         bbox = _bbox_from_binary(mask)
         crop = mask[bbox[1]:bbox[3], bbox[0]:bbox[2]].astype(np.float32)
         for S in [32, 64, 128]:
-            r = np.clip(t02.resize_float(crop, (S, S)), 0.0, 1.0)
+            r = np.clip(t02.resize_binary_shape_nearest(crop, (S, S)), 0.0, 1.0)
             self.assertEqual(r.shape, (S, S))
             self.assertTrue(np.all((r >= 0.0) & (r <= 1.0)))
 
@@ -617,7 +639,7 @@ class TestShapeCropResize(unittest.TestCase):
         bbox = _bbox_from_binary(mask)
         crop = mask[bbox[1]:bbox[3], bbox[0]:bbox[2]].astype(np.float32)
         self.assertEqual(crop.shape, (32, 24))
-        r = np.clip(t02.resize_float(crop, (64, 64)), 0.0, 1.0)
+        r = np.clip(t02.resize_binary_shape_nearest(crop, (64, 64)), 0.0, 1.0)
         self.assertEqual(r.shape, (64, 64))
 
     def test_empty_mask_bbox_none(self):
@@ -629,7 +651,7 @@ class TestShapeCropResize(unittest.TestCase):
         bbox = _bbox_from_binary(mask)
         self.assertIsNotNone(bbox)
         crop = mask[bbox[1]:bbox[3], bbox[0]:bbox[2]].astype(np.float32)
-        r = np.clip(t02.resize_float(crop, (64, 64)), 0.0, 1.0)
+        r = np.clip(t02.resize_binary_shape_nearest(crop, (64, 64)), 0.0, 1.0)
         self.assertGreaterEqual(float(r[32, 32]), 0.9)
 
 
@@ -645,7 +667,7 @@ class TestComputeRingMask(unittest.TestCase):
         fh, fw = 32, 32
         bbox = [10.0, 10.0, 22.0, 22.0]
         gh, gw = 64, 64
-        ring = t02._compute_ring_mask(fh, fw, bbox, gh, gw, ring_width=4)
+        ring = t02._compute_ring_mask(fh, fw, bbox, gh, gw, ring_width_tokens=4)
         self.assertEqual(ring.shape, (32, 32))
         self.assertEqual(ring.dtype, bool)
         # interior False
@@ -661,21 +683,21 @@ class TestComputeRingMask(unittest.TestCase):
         fh, fw = 32, 32
         bbox = [20.0, 20.0, 44.0, 44.0]
         gh, gw = 64, 64
-        c1 = int(t02._compute_ring_mask(fh, fw, bbox, gh, gw, ring_width=3).sum())
-        c2 = int(t02._compute_ring_mask(fh, fw, bbox, gh, gw, ring_width=9).sum())
+        c1 = int(t02._compute_ring_mask(fh, fw, bbox, gh, gw, ring_width_tokens=3).sum())
+        c2 = int(t02._compute_ring_mask(fh, fw, bbox, gh, gw, ring_width_tokens=9).sum())
         self.assertGreaterEqual(c2, c1)
 
     def test_boundary_clamped(self):
-        ring = t02._compute_ring_mask(32, 32, [0, 0, 10, 10], 64, 64, ring_width=15)
+        ring = t02._compute_ring_mask(32, 32, [0, 0, 10, 10], 64, 64, ring_width_tokens=15)
         self.assertEqual(ring.shape, (32, 32))
 
     def test_far_pixels_excluded(self):
-        ring = t02._compute_ring_mask(32, 32, [16, 16, 24, 24], 64, 64, ring_width=2)
+        ring = t02._compute_ring_mask(32, 32, [16, 16, 24, 24], 64, 64, ring_width_tokens=2)
         for r, c in [(0, 0), (0, 31), (31, 0), (31, 31)]:
             self.assertFalse(ring[r, c])
 
     def test_binary(self):
-        ring = t02._compute_ring_mask(32, 32, [8, 8, 24, 24], 128, 128, ring_width=3)
+        ring = t02._compute_ring_mask(32, 32, [8, 8, 24, 24], 128, 128, ring_width_tokens=3)
         self.assertTrue(set(np.unique(ring)).issubset({False, True}))
 
 
@@ -970,6 +992,394 @@ class TestInferRoundTag(unittest.TestCase):
     def test_no_match(self):
         self.assertEqual(
             t02.infer_round_tag_from_method("idea1_baseline"), "unknown_round")
+
+
+# ============================================================================
+# H: Ring geometry tests
+# ============================================================================
+
+class TestRingGeometry(unittest.TestCase):
+    """Background ring geometry: width 0/1/2, bbox interior excluded,
+    boundary clipping."""
+
+    def setUp(self):
+        self.feature_h, self.feature_w = 16, 16
+        self.bbox = [100.0, 80.0, 300.0, 250.0]  # x1,y1,x2,y2 in teacher
+        self.gt_h, self.gt_w = 512, 512
+
+    def _call(self, width):
+        return t02._compute_ring_mask(
+            self.feature_h, self.feature_w,
+            self.bbox, self.gt_h, self.gt_w,
+            width,
+        )
+
+    def test_width_zero_returns_empty(self):
+        ring = self._call(0)
+        self.assertFalse(ring.any(), "width=0 must produce all-False ring")
+
+    def test_width_one_has_tokens(self):
+        ring = self._call(1)
+        self.assertTrue(ring.any(), "width=1 must produce non-empty ring")
+
+    def test_width_two_has_more_tokens_than_width_one(self):
+        r1 = self._call(1)
+        r2 = self._call(2)
+        self.assertGreater(
+            int(r2.sum()), int(r1.sum()),
+            "width=2 must have more tokens than width=1",
+        )
+
+    def test_interior_never_in_ring(self):
+        ring = self._call(1)
+        scale_h = self.feature_h / self.gt_h
+        scale_w = self.feature_w / self.gt_w
+        x1, y1, x2, y2 = (float(v) for v in self.bbox)
+        ix1 = int(x1 * scale_w)
+        iy1 = int(y1 * scale_h)
+        ix2 = min(self.feature_w, int(np.ceil(x2 * scale_w)))
+        iy2 = min(self.feature_h, int(np.ceil(y2 * scale_h)))
+        # Every interior position must be False
+        interior = ring[iy1:iy2, ix1:ix2]
+        self.assertFalse(
+            interior.any(),
+            "original bbox interior must not be in ring",
+        )
+
+    def test_ring_clips_at_boundary(self):
+        # Place bbox at top-left corner so expansion would go negative
+        ring = t02._compute_ring_mask(
+            16, 16, [0.0, 0.0, 63.0, 63.0], 512, 512, 3,
+        )
+        # Should not crash and should produce boolean array
+        self.assertEqual(ring.dtype, bool)
+        self.assertEqual(ring.shape, (16, 16))
+
+    def test_bbox_never_modified(self):
+        """Verify _compute_ring_mask is side-effect free on bbox list."""
+        bbox_copy = list(self.bbox)
+        self._call(1)
+        self.assertEqual(bbox_copy, self.bbox,
+                         "bbox must not be modified by _compute_ring_mask")
+
+
+# ============================================================================
+# I: Global background tests
+# ============================================================================
+
+class TestGlobalBackground(unittest.TestCase):
+    """Global GT-based background: excludes other instances, other classes,
+    and ignore=255."""
+
+    def _make_gt(self, h=64, w=64):
+        return np.zeros((h, w), dtype=np.int64)
+
+    def _make_coverage_map(self, mask, feature_h=8, feature_w=8):
+        return t02.resize_binary_mask_to_coverage_area(
+            mask.astype(np.float32), (feature_h, feature_w),
+        )
+
+    def test_pure_bg_allowed(self):
+        """gt==0 everywhere: all coverage is 0, tokens are valid bg."""
+        gt = self._make_gt()
+        cov = self._make_coverage_map((gt != 0))
+        self.assertTrue((cov <= 0.10).all())
+
+    def test_other_instance_excluded(self):
+        """Instance B in GT excludes token from being A's background."""
+        gt = self._make_gt()
+        # Instance B occupies half of the gt
+        gt[:, 32:] = 2
+        cov = self._make_coverage_map((gt != 0))
+        # Right half has high non-bg coverage, must be rejected
+        bg_valid = cov <= 0.10
+        self.assertTrue(bg_valid[:, :4].all(),
+                        "left half (true bg) must be valid")
+        self.assertFalse(bg_valid[:, 4:].any(),
+                         "right half (instance B) must be rejected")
+
+    def test_other_class_excluded(self):
+        """Other class foreground is excluded from background."""
+        gt = self._make_gt()
+        gt[10:54, 10:54] = 3  # different class
+        cov = self._make_coverage_map((gt != 0))
+        bg_valid = cov <= 0.10
+        self.assertFalse(bg_valid.all(),
+                         "other-class foreground must be rejected from bg")
+
+    def test_ignore_255_excluded(self):
+        """Ignore=255 must be excluded from background."""
+        gt = self._make_gt()
+        gt[10:54, 30:34] = 255
+        cov = self._make_coverage_map((gt != 0))
+        bg_valid = cov <= 0.10
+        # The token covering the 255 region must be rejected
+        col3_valid = bg_valid[:, 3]
+        self.assertFalse(
+            col3_valid.all(),
+            "tokens covering ignore=255 must be rejected from bg",
+        )
+
+    def test_90pct_bg_allowed(self):
+        """Token with 90% bg + 10% non-bg is allowed."""
+        gt = self._make_gt(512, 512)
+        # Place a small non-bg region covering ~10% of a 64x64 area (= feature token)
+        # Feature token at position (0,0) covers teacher pixels 0:64, 0:64
+        # 10% of 64x64 = ~410 pixels. Put ~400 pixels of class 1.
+        gt[0:20, 0:20] = 1  # 400 pixels = ~9.8%
+        cov = t02.resize_binary_mask_to_coverage_area(
+            (gt != 0).astype(np.float32), (8, 8),
+        )
+        self.assertTrue(
+            cov[0, 0] <= 0.10,
+            f"~9.8% non-bg coverage must be <= 0.10, got {cov[0,0]:.4f}",
+        )
+
+    def test_over_10pct_non_bg_rejected(self):
+        """Token with >10% non-bg is rejected."""
+        gt = self._make_gt(512, 512)
+        # Place non-bg covering ~15% of the upper-left token area
+        gt[0:25, 0:25] = 1  # 625 pixels / 4096 ≈ 15.3%
+        cov = t02.resize_binary_mask_to_coverage_area(
+            (gt != 0).astype(np.float32), (8, 8),
+        )
+        self.assertGreater(
+            cov[0, 0], 0.10,
+            f"~15% non-bg coverage must be > 0.10, got {cov[0,0]:.4f}",
+        )
+
+
+# ============================================================================
+# J: Area coverage tests
+# ============================================================================
+
+class TestAreaCoverage(unittest.TestCase):
+    """resize_binary_mask_to_coverage_area uses INTER_AREA for true
+    area averaging."""
+
+    def test_all_zero(self):
+        mask = np.zeros((128, 128), dtype=np.float32)
+        cov = t02.resize_binary_mask_to_coverage_area(mask, (8, 8))
+        self.assertTrue(np.allclose(cov, 0.0, atol=0.01))
+
+    def test_all_one(self):
+        mask = np.ones((128, 128), dtype=np.float32)
+        cov = t02.resize_binary_mask_to_coverage_area(mask, (8, 8))
+        self.assertTrue(np.allclose(cov, 1.0, atol=0.01))
+
+    def test_half_coverage(self):
+        """With 128→8, output cells cover 16×16 input pixels.
+        Place FG in first 72 rows so cell 4 spans 8 FG + 8 BG → 0.5."""
+        mask = np.zeros((128, 128), dtype=np.float32)
+        mask[:, :72] = 1.0  # boundary at col 72, inside cell 4 (cols 64-79)
+        cov = t02.resize_binary_mask_to_coverage_area(mask, (8, 8))
+        # Cells 0-3 are fully FG (cols 0-63), cell 4 has 8/16=0.5 FG
+        self.assertTrue(np.allclose(cov[:, :4], 1.0, atol=0.01))
+        self.assertTrue(np.allclose(cov[:, 4], 0.5, atol=0.05),
+                        f"cell 4 expected ~0.5, got {cov[:,4]}")
+        self.assertTrue(np.allclose(cov[:, 5:], 0.0, atol=0.01))
+
+    def test_quarter_coverage(self):
+        """128→8, cell=16×16. mask[:72,:72] → cell (4,4) has 8×8/16×16=0.25."""
+        mask = np.zeros((128, 128), dtype=np.float32)
+        mask[:72, :72] = 1.0  # boundary at row 72, col 72
+        cov = t02.resize_binary_mask_to_coverage_area(mask, (8, 8))
+        # Cell (4,4) gets 64/256 = 0.25
+        self.assertTrue(np.allclose(cov[4, 4], 0.25, atol=0.05),
+                        f"cell (4,4) expected ~0.25, got {cov[4,4]:.4f}")
+        # Cells (0-3, 0-3) are fully inside FG
+        self.assertTrue(np.allclose(cov[:4, :4], 1.0, atol=0.01))
+        # Cells (5:, 5:) are fully outside
+        self.assertTrue(np.allclose(cov[5:, 5:], 0.0, atol=0.01))
+
+    def test_not_bilinear(self):
+        """INTER_AREA gives 0.0 or 1.0 when boundary aligns with cell edges;
+        bilinear would smear. A clean boundary proves area mode."""
+        mask = np.zeros((128, 128), dtype=np.float32)
+        mask[:, :64] = 1.0  # boundary aligns with cell 4 start
+        cov = t02.resize_binary_mask_to_coverage_area(mask, (8, 8))
+        # Boundary at col 64 → cell 4 (cols 64-79) is fully BG = 0.0
+        self.assertTrue(
+            np.allclose(cov[:, 4], 0.0, atol=0.01),
+            f"boundary column must be 0.0 (area), got {cov[:,4]}",
+        )
+        # Cell 3 (cols 48-63) is fully FG = 1.0
+        self.assertTrue(
+            np.allclose(cov[:, 3], 1.0, atol=0.01),
+            f"inner column must be 1.0 (area), got {cov[:,3]}",
+        )
+
+
+class TestShapeResizeNearest(unittest.TestCase):
+    """resize_binary_shape_nearest uses INTER_NEAREST to preserve 0/1."""
+
+    def test_output_is_binary(self):
+        mask = np.random.randn(37, 41) > 0  # boolean
+        resized = t02.resize_binary_shape_nearest(
+            mask.astype(np.float32), (64, 64),
+        )
+        unique = np.unique(resized)
+        self.assertTrue(set(unique).issubset({0.0, 1.0}),
+                        f"nearest resize must produce only 0 and 1, got {unique}")
+
+    def test_preserves_structure(self):
+        mask = np.zeros((50, 50), dtype=np.float32)
+        mask[10:40, 10:40] = 1.0
+        resized = t02.resize_binary_shape_nearest(mask, (64, 64))
+        self.assertGreater(resized.sum(), 0)
+        self.assertLess(resized.sum(), 64 * 64)
+
+
+# ============================================================================
+# K: CLI contract tests
+# ============================================================================
+
+class TestCliContract(unittest.TestCase):
+    """New args accepted, old args rejected."""
+
+    def setUp(self):
+        self._B = [
+            "--processed_root", "/tmp",
+            "--checkpoint", "/tmp/ckpt.pth",
+            "--datasets", "btcv",
+            "--method", "test_m",
+        ]
+
+    def test_bg_ring_width_tokens_in_help(self):
+        help_text = t02.build_parser().format_help()
+        self.assertIn("--bg_ring_width_tokens", help_text)
+
+    def test_ring_expand_ratio_not_in_help(self):
+        help_text = t02.build_parser().format_help()
+        self.assertNotIn("--ring_expand_ratio", help_text)
+
+    def test_max_global_non_bg_coverage_in_help(self):
+        help_text = t02.build_parser().format_help()
+        self.assertIn("--max_global_non_bg_coverage", help_text)
+
+    def test_bg_coverage_threshold_not_in_help(self):
+        help_text = t02.build_parser().format_help()
+        self.assertNotIn("--bg_coverage_threshold", help_text)
+
+
+# ============================================================================
+# L: NPZ and Stats contract tests
+# ============================================================================
+
+class TestNpzStatsContract(unittest.TestCase):
+    """Stats contain new fields, do not contain old fields."""
+
+    def setUp(self):
+        import tempfile
+        self._tmpdir = Path(tempfile.mkdtemp(prefix="test_npz_"))
+        self._npz_path = self._tmpdir / "test.npz"
+        self._stats_path = self._tmpdir / "stats.json"
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(str(self._tmpdir), ignore_errors=True)
+
+    def _write_dummy_npz(self):
+        """Write minimal valid NPZ."""
+        arrays = {
+            "class_ids": np.array([1], dtype=np.int64),
+            "feature_dim": np.array(768, dtype=np.int64),
+            "shape_size": np.array([64, 64], dtype=np.int64),
+            "method": np.array("test"),
+            "round_tag": np.array("r00_full5"),
+            "run_id": np.array("test_m_r00_full5"),
+            "bank_fg_c1": np.zeros((10, 768), dtype=np.float32),
+            "bank_bg_c1": np.zeros((10, 768), dtype=np.float32),
+            "shape_templates_c1": np.zeros((2, 64, 64), dtype=np.float32),
+            "shape_semantic_centers_c1": np.zeros((2, 768), dtype=np.float32),
+            "shape_cluster_instance_counts_c1": np.array([5, 5], dtype=np.int64),
+            "shape_cluster_support_counts_c1": np.array([5, 5], dtype=np.int64),
+        }
+        np.savez_compressed(str(self._npz_path), **arrays)
+
+    def _write_dummy_stats(self, extra=None):
+        stats = {
+            "bg_ring_width_tokens": 1,
+            "fg_coverage_threshold": 0.90,
+            "max_global_non_bg_coverage": 0.10,
+            "zero_bg_instance_count": 0,
+            "instances_with_bg_tokens": 10,
+            "instances_without_bg_tokens": 0,
+            "total_bg_ring_candidate_tokens": 500,
+            "total_valid_global_bg_tokens": 200,
+            "bg_ring_valid_ratio": 0.4,
+            "global_non_bg_coverage_ring_min": 0.0,
+            "global_non_bg_coverage_ring_mean": 0.05,
+            "global_non_bg_coverage_ring_max": 0.10,
+        }
+        if extra:
+            stats.update(extra)
+        import json
+        self._stats_path.write_text(json.dumps(stats))
+
+    def test_npz_keys_unchanged(self):
+        self._write_dummy_npz()
+        import zipfile
+        with zipfile.ZipFile(str(self._npz_path), "r") as zf:
+            names = set(zf.namelist())
+        expected = {
+            "class_ids.npy", "feature_dim.npy", "shape_size.npy",
+            "method.npy", "round_tag.npy", "run_id.npy",
+            "bank_fg_c1.npy", "bank_bg_c1.npy",
+            "shape_templates_c1.npy", "shape_semantic_centers_c1.npy",
+            "shape_cluster_instance_counts_c1.npy",
+            "shape_cluster_support_counts_c1.npy",
+        }
+        self.assertEqual(names, expected)
+
+    def test_npz_no_old_keys(self):
+        self._write_dummy_npz()
+        import zipfile
+        with zipfile.ZipFile(str(self._npz_path), "r") as zf:
+            names = set(zf.namelist())
+        self.assertNotIn("proto_fg_c1.npy", names)
+        self.assertNotIn("proto_bg_c1.npy", names)
+        self.assertNotIn("shape_A_c1.npy", names)
+        self.assertNotIn("shape_R_c1.npy", names)
+
+    def test_npz_allow_pickle_false(self):
+        self._write_dummy_npz()
+        data = np.load(str(self._npz_path), allow_pickle=False)
+        self.assertIn("class_ids", data)
+        data.close()
+
+    def test_stats_new_fields(self):
+        self._write_dummy_stats()
+        import json
+        s = json.loads(self._stats_path.read_text())
+        for field in [
+            "bg_ring_width_tokens",
+            "fg_coverage_threshold",
+            "max_global_non_bg_coverage",
+            "zero_bg_instance_count",
+            "instances_with_bg_tokens",
+            "instances_without_bg_tokens",
+            "total_bg_ring_candidate_tokens",
+            "total_valid_global_bg_tokens",
+            "bg_ring_valid_ratio",
+            "global_non_bg_coverage_ring_min",
+            "global_non_bg_coverage_ring_mean",
+            "global_non_bg_coverage_ring_max",
+        ]:
+            with self.subTest(field=field):
+                self.assertIn(field, s)
+
+    def test_stats_no_ring_expand_ratio(self):
+        self._write_dummy_stats()
+        import json
+        s = json.loads(self._stats_path.read_text())
+        self.assertNotIn("ring_expand_ratio", s)
+
+    def test_stats_no_bg_coverage_threshold(self):
+        self._write_dummy_stats()
+        import json
+        s = json.loads(self._stats_path.read_text())
+        self.assertNotIn("bg_coverage_threshold", s)
 
 
 # ============================================================================

@@ -466,7 +466,8 @@ class TestCommandBuilders(unittest.TestCase):
             kmax_shape=5,
             shape_size=64,
             cluster_max_iter=25,
-            ring_expand_ratio=5,
+            bg_ring_width_tokens=1,
+            max_global_non_bg_coverage=0.10,
             epochs=100,
             max_steps=1000,
             lr=1e-4,
@@ -535,7 +536,8 @@ class TestCommandBuilders(unittest.TestCase):
         self.assertIn("--kmax_shape", cmd)
         self.assertIn("--shape_size", cmd)
         self.assertIn("--cluster_max_iter", cmd)
-        self.assertIn("--ring_expand_ratio", cmd)
+        self.assertIn("--bg_ring_width_tokens", cmd)
+        self.assertIn("--max_global_non_bg_coverage", cmd)
 
     def test_build_template_command_overwrite(self):
         cmd = runner.build_template_command(
@@ -1271,7 +1273,9 @@ class TestRunnerDryRunArgumentsSupported(unittest.TestCase):
             temperature=0.1, top_k=5,
             pseudo_log_every=10,
             kmax_shape=5, shape_size=64,
-            cluster_max_iter=25, ring_expand_ratio=5,
+            cluster_max_iter=25,
+            bg_ring_width_tokens=1,
+            max_global_non_bg_coverage=0.10,
         )
         self.scripts = {
             "split": Path("/fake/01.py"),
@@ -1474,6 +1478,129 @@ class TestValidatorSelectContract(unittest.TestCase):
         }
         errors = v08.validate_select(paths, is_3d=False, round_tag="r03_full20")
         self.assertTrue(any("unexpected file" in e for e in errors))
+
+
+class TestValidatorSupportStats(unittest.TestCase):
+    """08 validate_template must check new stats fields and reject old ones."""
+
+    def setUp(self):
+        import tempfile
+        import importlib
+        self._tmpdir = Path(tempfile.mkdtemp(prefix="test_vss_"))
+        self.v08 = importlib.import_module(
+            "idea1_iterclean_bank_adaptshape.08_validate_round_outputs"
+        )
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(str(self._tmpdir), ignore_errors=True)
+
+    def _write_npz(self, path, with_old_keys=False):
+        import numpy as np
+        import zipfile
+        arrays = {
+            "class_ids": np.array([1], dtype=np.int64),
+            "feature_dim": np.array(768, dtype=np.int64),
+            "shape_size": np.array([64, 64], dtype=np.int64),
+            "method": np.array("test"),
+            "round_tag": np.array("r00_full5"),
+            "run_id": np.array("test_r00_full5"),
+            "bank_fg_c1": np.ones((10, 768), dtype=np.float32),
+            "bank_bg_c1": np.ones((10, 768), dtype=np.float32),
+            "shape_templates_c1": np.ones((2, 64, 64), dtype=np.float32),
+            "shape_semantic_centers_c1": np.ones((2, 768), dtype=np.float32),
+            "shape_cluster_instance_counts_c1": np.array([5, 5], dtype=np.int64),
+            "shape_cluster_support_counts_c1": np.array([5, 5], dtype=np.int64),
+        }
+        if with_old_keys:
+            arrays["proto_fg_c1"] = np.ones((10, 768), dtype=np.float32)
+        with zipfile.ZipFile(str(path), "w", zipfile.ZIP_DEFLATED) as zf:
+            import io as _io_npz
+            for name, arr in arrays.items():
+                buf = _io_npz.BytesIO()
+                np.save(buf, arr, allow_pickle=False)
+                zf.writestr(name + ".npy", buf.getvalue())
+
+    def _write_stats(self, path, include_old=False, include_new=True):
+        import json
+        stats = {}
+        if include_new:
+            stats.update({
+                "bg_ring_width_tokens": 1,
+                "fg_coverage_threshold": 0.90,
+                "max_global_non_bg_coverage": 0.10,
+                "zero_bg_instance_count": 2,
+                "instances_with_bg_tokens": 8,
+                "instances_without_bg_tokens": 2,
+                "total_bg_ring_candidate_tokens": 500,
+                "total_valid_global_bg_tokens": 200,
+                "bg_ring_valid_ratio": 0.4,
+                "global_non_bg_coverage_ring_min": 0.0,
+                "global_non_bg_coverage_ring_mean": 0.05,
+                "global_non_bg_coverage_ring_max": 0.10,
+            })
+        if include_old:
+            stats["ring_expand_ratio"] = 5
+            stats["bg_coverage_threshold"] = 0.1
+        path.write_text(json.dumps(stats))
+
+    def test_new_stats_fields_valid(self):
+        npz = self._tmpdir / "test.npz"
+        stats = self._tmpdir / "stats.json"
+        self._write_npz(npz)
+        self._write_stats(stats)
+        paths = {"support_path": npz, "support_stats_path": stats}
+        errors = self.v08.validate_template(paths, strict=True)
+        self.assertEqual(errors, [])
+
+    def test_rejects_old_ring_expand_ratio_in_stats(self):
+        npz = self._tmpdir / "test.npz"
+        stats = self._tmpdir / "stats.json"
+        self._write_npz(npz)
+        self._write_stats(stats, include_old=True)
+        paths = {"support_path": npz, "support_stats_path": stats}
+        errors = self.v08.validate_template(paths, strict=True)
+        self.assertTrue(
+            any("ring_expand_ratio" in e for e in errors),
+            "must reject stats containing ring_expand_ratio",
+        )
+
+    def test_rejects_old_bg_coverage_threshold_in_stats(self):
+        npz = self._tmpdir / "test.npz"
+        stats = self._tmpdir / "stats.json"
+        self._write_npz(npz)
+        self._write_stats(stats, include_old=True)
+        paths = {"support_path": npz, "support_stats_path": stats}
+        errors = self.v08.validate_template(paths, strict=True)
+        self.assertTrue(
+            any("bg_coverage_threshold" in e for e in errors),
+            "must reject stats containing bg_coverage_threshold",
+        )
+
+    def test_missing_new_field_reported(self):
+        npz = self._tmpdir / "test.npz"
+        stats = self._tmpdir / "stats.json"
+        self._write_npz(npz)
+        self._write_stats(stats, include_new=False)
+        paths = {"support_path": npz, "support_stats_path": stats}
+        errors = self.v08.validate_template(paths, strict=True)
+        self.assertTrue(
+            any("bg_ring_width_tokens" in e for e in errors),
+            "must report missing bg_ring_width_tokens",
+        )
+
+    def test_wrong_bg_ring_width_reported(self):
+        npz = self._tmpdir / "test.npz"
+        stats = self._tmpdir / "stats.json"
+        self._write_npz(npz)
+        self._write_stats(stats)
+        import json
+        d = json.loads(stats.read_text())
+        d["bg_ring_width_tokens"] = 5
+        stats.write_text(json.dumps(d))
+        paths = {"support_path": npz, "support_stats_path": stats}
+        errors = self.v08.validate_template(paths, strict=True)
+        self.assertTrue(any("bg_ring_width_tokens" in e for e in errors))
 
 
 class TestFormalFinalRoundSemantics(unittest.TestCase):
