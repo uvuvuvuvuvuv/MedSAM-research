@@ -49,6 +49,7 @@ Round 1: External Split from Selection → [Bank + Shapes]  → Train Decoder �
 | shape_size | 64 | Shape template resolution |
 | kmax_shape | 5 | Max clusters per class |
 | cluster_max_iter | 25 | Spherical k-means iterations |
+| max_fg_fallback_tokens | 4 | Max FG tokens selected via fallback for zero-primary-FG instances |
 
 ### Training (03)
 | Parameter | Default | Description |
@@ -104,7 +105,7 @@ Round 1: External Split from Selection → [Bank + Shapes]  → Train Decoder �
 ### Stage Validators
 Each stage output is validated by the runner:
 - **Split**: Full/Box record counts, no test leakage, unit count matches schedule
-- **Template**: NPZ keys (bank_fg_c*, bank_bg_c*, shape_templates_c*), no old keys, allow_pickle=False
+- **Template**: NPZ keys (bank_fg_c*, bank_bg_c*, shape_templates_c*), no old keys, allow_pickle=False. Support stats validated with schema v1 (backward-compatible) or v2 (strict fallback fields required).
 - **Train**: Checkpoint non-empty, summary method/global_step/trainable correct
 - **Pseudo**: Teacher/student counts match expected, audit output_complete=true
 - **Select**: Summary counts consistent, test_samples_used=0
@@ -136,3 +137,5 @@ python -m unittest discover -s idea1_iterclean_bank_adaptshape/tests -p "test_*.
 - First round uses random sampling; selection quality improves with subsequent rounds
 - 3D per-case balancing may discard tokens from very large cases
 - ACDC中目标结构彼此邻近，且feature token具有有限空间分辨率，因此紧密框外一层ring中的部分token会同时覆盖确定背景与其他前景结构。全局非背景覆盖率超过0.10的token会被严格过滤，因而3D的bg_ring_valid_ratio低于2D。这是全局背景纯度约束的预期结果。
+- FG fallback selects tokens below the primary coverage threshold (0.90). These tokens may carry mixed/weak foreground signal. Fallback is a deterministic safety net for small instances that would otherwise have zero FG tokens; it is not a substitute for tuning `fg_coverage_threshold`.
+- `support_stats_schema_version = 2` requires all fallback fields to be present. Stats produced by older code (schema v1) pass backward-compatible validation but lack fallback fields.

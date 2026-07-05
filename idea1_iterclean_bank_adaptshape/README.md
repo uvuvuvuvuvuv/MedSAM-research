@@ -49,6 +49,19 @@ Iterative sampling pipeline for MedSAM fine-tuning with Feature Bank and Adaptiv
 - GT-IoU scoring; 2D per-slice, 3D per-case aggregation (worst20_mean)
 - Test data never participates
 
+### FG Fallback (02)
+- When an instance has zero primary FG tokens (all coverage < 0.90), a
+  deterministic fallback selects up to `max_fg_fallback_tokens` (default 4)
+  cells with positive coverage within the instance's tight bbox.
+- Selection order: coverage desc → row asc → col asc.
+- Fallback coverage values are recorded in per-instance stats
+  (`fg_source`, `fg_fallback_coverage`) and aggregated in support stats
+  (`instances_with_primary_fg`, `instances_with_fallback_fg`,
+  `fg_fallback_coverage_min/mean/max`).
+- Support stats use `support_stats_schema_version = 2` when fallback
+  fields are present. The 08 validator enforces strict completeness for
+  schema v2 while remaining backward-compatible with v1.
+
 ## Shared Modules
 
 - `pipeline_common.py` — path construction, atomic JSON, Git checks, stage markers
