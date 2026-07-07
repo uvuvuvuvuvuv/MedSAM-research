@@ -433,6 +433,138 @@ def native_mask_to_student(
     return canvas
 
 
+
+def shape_prior_is_valid(
+    shape_prior: np.ndarray,
+    box_mask: np.ndarray,
+    *,
+    min_mean: float,
+    min_nonzero_ratio: float,
+    eps: float = 1e-8,
+) -> bool:
+    """Return whether the shape prior provides usable support in this Box."""
+    values = np.asarray(shape_prior, dtype=np.float32)[
+        np.asarray(box_mask, dtype=bool)
+    ]
+
+    if values.size == 0:
+        return False
+
+    finite = values[np.isfinite(values)]
+    if finite.size == 0:
+        return False
+
+    finite = np.clip(finite, 0.0, 1.0)
+
+    mean_value = float(finite.mean())
+    nonzero_ratio = float((finite > eps).mean())
+
+    return (
+        mean_value >= max(float(min_mean), 0.0)
+        and nonzero_ratio >= max(float(min_nonzero_ratio), 0.0)
+    )
+
+
+def apply_nonempty_box_guard(
+    foreground: np.ndarray,
+    unknown: np.ndarray,
+    score: np.ndarray,
+    box_mask: np.ndarray,
+    *,
+    tau_low: float,
+    top_fraction: float,
+    min_peak: float,
+) -> tuple[np.ndarray, np.ndarray, bool]:
+    """Preserve a minimal foreground core in a known non-empty Box.
+
+    The guard uses only the visible Box prompt and the fusion score. It does
+    not read hidden GT. It is therefore valid for Box-supervised samples.
+    """
+    foreground = np.asarray(foreground, dtype=bool).copy()
+    unknown = np.asarray(unknown, dtype=bool).copy()
+    box_mask = np.asarray(box_mask, dtype=bool)
+    score = np.asarray(score, dtype=np.float32)
+
+    if foreground.any() or not box_mask.any():
+        return foreground, unknown, False
+
+    coordinates = np.argwhere(box_mask)
+    box_scores = score[box_mask]
+
+    if box_scores.size == 0:
+        return foreground, unknown, False
+
+    finite_scores = np.nan_to_num(
+        box_scores,
+        nan=-np.inf,
+        posinf=1.0,
+        neginf=-np.inf,
+    )
+
+    peak = float(finite_scores.max())
+    if not np.isfinite(peak) or peak < float(min_peak):
+        return foreground, unknown, False
+
+    fraction = float(np.clip(top_fraction, 1e-4, 0.10))
+    top_count = max(
+        1,
+        int(np.ceil(finite_scores.size * fraction)),
+    )
+    top_count = min(top_count, finite_scores.size)
+
+    if top_count == finite_scores.size:
+        selected_indices = np.arange(finite_scores.size)
+    else:
+        kth = finite_scores.size - top_count
+        selected_indices = np.argpartition(
+            finite_scores,
+            kth,
+        )[kth:]
+
+    seed = np.zeros_like(box_mask, dtype=np.uint8)
+    selected_coordinates = coordinates[selected_indices]
+    seed[
+        selected_coordinates[:, 0],
+        selected_coordinates[:, 1],
+    ] = 1
+
+    # Slightly connect nearby high-score pixels, without leaving the Box.
+    seed = cv2.dilate(
+        seed,
+        np.ones((3, 3), dtype=np.uint8),
+        iterations=1,
+    )
+    seed = seed.astype(bool) & box_mask
+
+    # Retain only the component containing the score maximum.
+    peak_index = int(np.argmax(finite_scores))
+    peak_y, peak_x = coordinates[peak_index]
+
+    num_labels, labels = cv2.connectedComponents(
+        seed.astype(np.uint8)
+    )
+    peak_label = int(labels[peak_y, peak_x])
+
+    if num_labels > 1 and peak_label > 0:
+        seed = labels == peak_label
+
+    if not seed.any():
+        seed[peak_y, peak_x] = True
+
+    foreground |= seed
+
+    # Preserve intermediate-score support as unknown rather than forcing it
+    # into definite background.
+    unknown |= (
+        box_mask
+        & (~foreground)
+        & (score > float(tau_low))
+    )
+    unknown &= ~foreground
+
+    return foreground, unknown, True
+
+
 def merge_instance_into_tri(
     tri: np.ndarray,
     foreground_mask: np.ndarray,
@@ -562,13 +694,83 @@ def generate_one_slice(
         box_mask = make_box_mask_np(box, height, width)
         all_boxes |= box_mask
 
-        # Tri-value fusion: score = alpha * P + beta * A + gamma * QF
-        score = args.alpha * p_np + args.beta * a_np + args.gamma * q_np
+        # 3D-robust reliability-aware fusion.
+        #
+        # Original v4.3:
+        #   score = alpha * P + beta * A + gamma * QF
+        #
+        # When a 3D shape map collapses to zero, keeping beta fixed lowers
+        # the attainable score. Here, invalid 3D shape maps receive beta=0,
+        # and the remaining valid weights are renormalized. The 2D path
+        # keeps the original formula exactly.
+        use_adaptive_shape = bool(
+            str(prompt_meta.get("dataset_name", "")).strip().lower() in {"acdc", "prostate158", "btcv"}
+            and args.adaptive_shape_reliability
+        )
+
+        shape_valid = True
+        if use_adaptive_shape:
+            shape_valid = shape_prior_is_valid(
+                a_np,
+                box_mask,
+                min_mean=args.shape_valid_min_mean,
+                min_nonzero_ratio=(
+                    args.shape_valid_min_nonzero_ratio
+                ),
+            )
+
+        effective_beta = args.beta if shape_valid else 0.0
+        effective_weight_sum = (
+            args.alpha
+            + effective_beta
+            + args.gamma
+        )
+
+        if effective_weight_sum <= 0:
+            raise RuntimeError(
+                "Effective fusion weights must have a positive sum: "
+                f"alpha={args.alpha}, "
+                f"effective_beta={effective_beta}, "
+                f"gamma={args.gamma}"
+            )
+
+        score = (
+            args.alpha * p_np
+            + effective_beta * a_np
+            + args.gamma * q_np
+        ) / effective_weight_sum
 
         foreground = box_mask & (score >= args.tau_high)
         background = box_mask & (score <= args.tau_low)
-        unknown = box_mask & (score > args.tau_low) & (score < args.tau_high)
-        tri = merge_instance_into_tri(tri, foreground, unknown, label_id)
+        unknown = (
+            box_mask
+            & (score > args.tau_low)
+            & (score < args.tau_high)
+        )
+
+        guard_enabled = (
+            bool(str(prompt_meta.get("dataset_name", "")).strip().lower() in {"acdc", "prostate158", "btcv"})
+            if args.nonempty_box_guard is None
+            else bool(args.nonempty_box_guard)
+        )
+
+        if guard_enabled and not foreground.any():
+            foreground, unknown, _ = apply_nonempty_box_guard(
+                foreground,
+                unknown,
+                score,
+                box_mask,
+                tau_low=args.tau_low,
+                top_fraction=args.nonempty_guard_top_fraction,
+                min_peak=args.nonempty_guard_min_peak,
+            )
+
+        tri = merge_instance_into_tri(
+            tri,
+            foreground,
+            unknown,
+            label_id,
+        )
 
         p_values.append(p_np[box_mask])
         q_values.append(q_np[box_mask])
@@ -1226,6 +1428,60 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Score <= tau_low → background (0).")
     parser.add_argument("--tau_high", type=float, default=0.70,
                         help="Score >= tau_high → foreground (label_id).")
+    parser.add_argument(
+        "--adaptive_shape_reliability",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "For 3D only: disable the shape weight when the shape prior "
+            "inside the current Box is invalid. Enabled by default."
+        ),
+    )
+    parser.add_argument(
+        "--shape_valid_min_mean",
+        type=float,
+        default=1e-4,
+        help=(
+            "Minimum Box-interior mean activation for a valid 3D "
+            "shape prior."
+        ),
+    )
+    parser.add_argument(
+        "--shape_valid_min_nonzero_ratio",
+        type=float,
+        default=1e-4,
+        help=(
+            "Minimum nonzero support ratio for a valid 3D shape prior."
+        ),
+    )
+    parser.add_argument(
+        "--nonempty_box_guard",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help=(
+            "Protect a minimal foreground core when a known non-empty "
+            "Box has no thresholded foreground. Default: on for 3D, "
+            "off for 2D."
+        ),
+    )
+    parser.add_argument(
+        "--nonempty_guard_top_fraction",
+        type=float,
+        default=0.01,
+        help=(
+            "Top fraction of Box score pixels used by the guard. "
+            "The effective range is [0.0001, 0.10]."
+        ),
+    )
+    parser.add_argument(
+        "--nonempty_guard_min_peak",
+        type=float,
+        default=0.50,
+        help=(
+            "Minimum Box score peak required to trigger the non-empty "
+            "Box guard."
+        ),
+    )
     parser.add_argument("--temperature", type=float, default=0.07,
                         help="Temperature for bank similarity softmax.")
     parser.add_argument("--top_k", type=int, default=10,
@@ -1241,6 +1497,8 @@ def validate_args(args: argparse.Namespace) -> None:
         raise ValueError("--max_samples must be >= 0")
     if args.log_every <= 0:
         raise ValueError("--log_every must be positive")
+
+
     for name in ("alpha", "beta", "gamma"):
         value = getattr(args, name)
         if not 0.0 <= value <= 1.0:
