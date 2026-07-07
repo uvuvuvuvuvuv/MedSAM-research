@@ -71,8 +71,8 @@ def is_formal_final_round(round_id: int, is_3d: bool) -> bool:
 SCRIPT_NAMES = {
     "split": "01_build_full_box_split.py",
     "template": "02_build_support_template.py",
-    "train": "03_train_medsam_sac.py",
-    "pseudo": "04_generate_pseudo_sac.py",
+    "train": "03_train_medsam_full_only.py",
+    "pseudo": "04_generate_pseudo_bank_adaptshape.py",
     "select": "05_select_hard_by_gt_iou.py",
 }
 
@@ -2395,7 +2395,7 @@ def add_training_arguments(
     parser: argparse.ArgumentParser,
 ) -> None:
     group = parser.add_argument_group(
-        "SAC training"
+        "full-only MedSAM training"
     )
 
     group.add_argument(
@@ -2546,7 +2546,7 @@ def add_pseudo_arguments(
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "Run iterative Full/Box hard sampling for SAC-MedSAM. "
+            "Run iterative Full/Box hard sampling with full-only MedSAM fine-tuning, feature banks and adaptive shapes. "
             "Each round rebuilds the support template, retrains "
             "from the same base MedSAM checkpoint, generates "
             "EMA pseudo-labels, and selects the lowest-IoU "

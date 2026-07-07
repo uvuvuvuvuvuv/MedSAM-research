@@ -1,4 +1,4 @@
-"""Unit tests for 03_train_medsam_sac module.
+"""Unit tests for 03_train_medsam_full_only module.
 
 Covers dice_loss_with_logits, set_seed, load_image_tensor,
 freeze_for_mask_decoder_only, parse_train_entries, EMA update,
@@ -33,7 +33,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 t03 = importlib.import_module(
-    "idea1_iterclean_bank_adaptshape.03_train_medsam_sac"
+    "idea1_iterclean_bank_adaptshape.03_train_medsam_full_only"
 )
 
 # ---------------------------------------------------------------------------

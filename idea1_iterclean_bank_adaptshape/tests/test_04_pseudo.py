@@ -1,4 +1,4 @@
-"""Unit tests for 04_generate_pseudo_sac module."""
+"""Unit tests for 04_generate_pseudo_bank_adaptshape module."""
 
 from __future__ import annotations
 
@@ -19,7 +19,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 t04 = importlib.import_module(
-    "idea1_iterclean_bank_adaptshape.04_generate_pseudo_sac"
+    "idea1_iterclean_bank_adaptshape.04_generate_pseudo_bank_adaptshape"
 )
 
 # ---------------------------------------------------------------------------

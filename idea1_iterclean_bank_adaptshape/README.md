@@ -8,8 +8,8 @@ Iterative sampling pipeline for MedSAM fine-tuning with Feature Bank and Adaptiv
 |-------|--------|-------------|
 | Split | `01_build_full_box_split.py` | Random (round 0) or external-selection (round 1+) Full/Box split |
 | Template | `02_build_support_template.py` | Feature bank extraction + adaptive shape clustering |
-| Train | `03_train_medsam_sac.py` | Mask-decoder-only fine-tuning with EMA |
-| Pseudo | `04_generate_pseudo_sac.py` | Tri-value pseudo-label generation with bank quality scores |
+| Train | `03_train_medsam_full_only.py` | Mask-decoder-only fine-tuning with EMA |
+| Pseudo | `04_generate_pseudo_bank_adaptshape.py` | Tri-value pseudo-label generation with bank quality scores |
 | Select | `05_select_hard_by_gt_iou.py` | GT-IoU-based hard sample selection for next round |
 
 ## Key Design Decisions
@@ -102,12 +102,12 @@ python 02_build_support_template.py \
     --datasets cvc_clinicdb --method <method> --round_tag r00_full5
 
 # Train mask decoder
-python 03_train_medsam_sac.py \
+python 03_train_medsam_full_only.py \
     --processed_root <path> --checkpoint <path> \
     --datasets cvc_clinicdb --method <method> --out_root <path>
 
 # Generate pseudo-labels
-python 04_generate_pseudo_sac.py \
+python 04_generate_pseudo_bank_adaptshape.py \
     --processed_root <path> --base_checkpoint <path> --ema_checkpoint <path> \
     --datasets cvc_clinicdb --method <method> --round_tag r00_full5 \
     --alpha 0.5 --beta 0.3 --gamma 0.2 --tau_low 0.1 --tau_high 0.5

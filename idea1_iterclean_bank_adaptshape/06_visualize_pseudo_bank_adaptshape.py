@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-SAC-MedSAM pseudo-label visualization and diagnosis for the cleaned mainline.
+IterClean-Bank-AdaptShape pseudo-label visualization and diagnosis for the cleaned mainline.
 
 Current pipeline assumptions:
 1) split metadata: meta/full_box_split_<method>.json;
 2) prompts: prompts/prompts_train.json (teacher-space boxes by default);
 3) geometry: meta/geometry_meta.json;
 4) frozen baseline pseudo labels: pseudo_student/<baseline_pseudo_name>;
-5) SAC pseudo labels: pseudo_student/<sac_pseudo_name>;
+5) Ours pseudo labels: pseudo_student/<ours_pseudo_name>;
 6) evaluation and ranking are performed in student space against student_gt;
 7) figures may be rendered in student space or reconstructed native space.
 
 The script supports both full runs and partial smoke runs. Full-supervision samples are
 shown only as references by default; aggregate method comparison is box-only so copied
-full GT masks do not inflate SAC quality.
+full GT masks do not inflate Ours quality.
 
 Label convention:
     0      background
@@ -100,7 +100,7 @@ class SampleRecord:
     native_image_path: Optional[Path]
     gt_path: Path
     baseline_path: Path
-    sac_path: Path
+    ours_path: Path
     label_mode: str
     prompt_meta: Optional[dict]
     geometry_meta: Optional[dict]
@@ -112,7 +112,7 @@ class RenderedSample:
     image_rgb: np.ndarray
     gt: np.ndarray
     baseline: np.ndarray
-    sac: np.ndarray
+    ours: np.ndarray
     boxes_student: List[Tuple[np.ndarray, int]]
     class_names: Dict[int, str]
     metrics: Dict[str, Any]
@@ -123,7 +123,7 @@ class RenderedSample:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Visualize frozen baseline and SAC-MedSAM tri-state pseudo labels "
+            "Visualize frozen baseline and IterClean-Bank-AdaptShape tri-state pseudo labels "
             "for the cleaned full/box training pipeline."
         )
     )
@@ -147,7 +147,7 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=Path(
             "/storage/baiyuting/data/out_data_idea1/visualization/"
-            "pseudo_quality/idea1_sac_medsam_final"
+            "pseudo_quality/idea1_iterclean_bank_adaptshape_v43"
         ),
     )
     parser.add_argument(
@@ -160,7 +160,7 @@ def parse_args() -> argparse.Namespace:
         help="Comma-separated dataset names.",
     )
     parser.add_argument("--fold", type=str, default="fold_0")
-    parser.add_argument("--method", type=str, default="idea1_sac_medsam_final")
+    parser.add_argument("--method", type=str, default="idea1_iterclean_bank_adaptshape_v43")
     parser.add_argument(
         "--baseline-pseudo-name", "--baseline_pseudo_name",
         dest="baseline_pseudo_name",
@@ -169,12 +169,12 @@ def parse_args() -> argparse.Namespace:
         help="Directory name under pseudo_student for the frozen baseline.",
     )
     parser.add_argument(
-        "--sac-pseudo-name", "--sac_pseudo_name",
-        dest="sac_pseudo_name",
+        "--ours-pseudo-name", "--ours_pseudo_name",
+        dest="ours_pseudo_name",
         type=str,
         default=None,
         help=(
-            "Directory name under pseudo_student for SAC. "
+            "Directory name under pseudo_student for Ours. "
             "Defaults to tri_train_<method>."
         ),
     )
@@ -260,7 +260,7 @@ def parse_args() -> argparse.Namespace:
         dest="allow_partial",
         action="store_true",
         help=(
-            "Skip train samples whose baseline/SAC pseudo file is absent. "
+            "Skip train samples whose baseline/Ours pseudo file is absent. "
             "Intended for max_samples smoke outputs."
         ),
     )
@@ -276,7 +276,7 @@ def parse_args() -> argparse.Namespace:
         choices=["box", "all"],
         default="box",
         help=(
-            "Rows used for aggregate comparison. box is recommended because SAC full "
+            "Rows used for aggregate comparison. box is recommended because Ours full "
             "samples are copied GT masks."
         ),
     )
@@ -299,13 +299,13 @@ def parse_args() -> argparse.Namespace:
         dest="validate_labels",
         action=argparse.BooleanOptionalAction,
         default=True,
-        help="Require GT/baseline/SAC values to be in {0, class IDs, 255}.",
+        help="Require GT/baseline/Ours values to be in {0, class IDs, 255}.",
     )
     args = parser.parse_args()
     if args.display_mode == "native_full":
         args.display_mode = "native"
-    if args.sac_pseudo_name is None:
-        args.sac_pseudo_name = f"tri_train_{args.method}"
+    if args.ours_pseudo_name is None:
+        args.ours_pseudo_name = f"tri_train_{args.method}"
     if args.only_box:
         args.include_full = False
         args.summary_scope = "box"
@@ -379,7 +379,7 @@ def find_existing(paths: Sequence[Path]) -> Optional[Path]:
 
 
 def find_prompt_file(fold_root: Path, method: str) -> Optional[Path]:
-    # 04_generate_pseudo_sac.py consumes prompts/prompts_train.json.
+    # 04_generate_pseudo_bank_adaptshape.py consumes prompts/prompts_train.json.
     return find_existing([
         fold_root / "prompts" / "prompts_train.json",
         fold_root / "prompts" / f"prompts_train_{method}.json",
@@ -745,7 +745,7 @@ def crop_display_arrays(
     image_rgb: np.ndarray,
     gt: np.ndarray,
     baseline: np.ndarray,
-    sac: np.ndarray,
+    ours: np.ndarray,
     boxes: Sequence[Tuple[np.ndarray, int]],
     margin: float,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, List[Tuple[np.ndarray, int]]]:
@@ -753,7 +753,7 @@ def crop_display_arrays(
     image2 = image_rgb[y1:y2, x1:x2]
     gt2 = gt[y1:y2, x1:x2]
     baseline2 = baseline[y1:y2, x1:x2]
-    sac2 = sac[y1:y2, x1:x2]
+    sac2 = ours[y1:y2, x1:x2]
     boxes2 = []
     for box, cid in boxes:
         mapped = box.astype(np.float32).copy()
@@ -765,13 +765,13 @@ def crop_display_arrays(
     return image2, gt2, baseline2, sac2, boxes2
 
 
-def validate_same_shape(gt: np.ndarray, baseline: np.ndarray, sac: np.ndarray, strict: bool) -> Tuple[np.ndarray, np.ndarray]:
-    if baseline.shape == gt.shape and sac.shape == gt.shape:
-        return baseline, sac
+def validate_same_shape(gt: np.ndarray, baseline: np.ndarray, ours: np.ndarray, strict: bool) -> Tuple[np.ndarray, np.ndarray]:
+    if baseline.shape == gt.shape and ours.shape == gt.shape:
+        return baseline, ours
     if strict:
-        raise ValueError(f"Shape mismatch: gt={gt.shape}, baseline={baseline.shape}, sac={sac.shape}")
+        raise ValueError(f"Shape mismatch: gt={gt.shape}, baseline={baseline.shape}, ours={ours.shape}")
     baseline2 = cv2.resize(baseline, (gt.shape[1], gt.shape[0]), interpolation=cv2.INTER_NEAREST)
-    sac2 = cv2.resize(sac, (gt.shape[1], gt.shape[0]), interpolation=cv2.INTER_NEAREST)
+    sac2 = cv2.resize(ours, (gt.shape[1], gt.shape[0]), interpolation=cv2.INTER_NEAREST)
     return baseline2.astype(np.uint8), sac2.astype(np.uint8)
 
 
@@ -1038,7 +1038,7 @@ def build_records(
     baseline_fold_root: Path,
     method: str,
     baseline_name: str,
-    sac_name: str,
+    ours_name: str,
     only_box: bool,
     strict: bool,
     allow_partial: bool,
@@ -1076,11 +1076,11 @@ def build_records(
         add_warning("No geometry_meta.json found; native display and teacher-box mapping will fail.")
 
     baseline_dir = baseline_fold_root / "pseudo_student" / baseline_name
-    sac_dir = fold_root / "pseudo_student" / sac_name
+    ours_dir = fold_root / "pseudo_student" / ours_name
     if not baseline_dir.exists():
         raise FileNotFoundError(f"Baseline pseudo directory missing: {baseline_dir}")
-    if not sac_dir.exists():
-        raise FileNotFoundError(f"SAC pseudo directory missing: {sac_dir}")
+    if not ours_dir.exists():
+        raise FileNotFoundError(f"Ours pseudo directory missing: {ours_dir}")
 
     stats: Dict[str, int] = {
         "manifest_items": len(manifest),
@@ -1090,7 +1090,7 @@ def build_records(
         "skipped_only_box": 0,
         "skipped_missing_core": 0,
         "skipped_missing_baseline": 0,
-        "skipped_missing_sac": 0,
+        "skipped_missing_ours": 0,
         "skipped_bad_gt": 0,
         "missing_prompt_box_samples": 0,
         "missing_geometry": 0,
@@ -1139,7 +1139,7 @@ def build_records(
         image_path = resolve_path(fold_root, image_value)
         gt_path = resolve_path(fold_root, gt_value)
         baseline_path = baseline_dir / slice_name
-        sac_path = sac_dir / slice_name
+        ours_path = ours_dir / slice_name
 
         core_missing = [path for path in (image_path, gt_path) if not path.exists()]
         if core_missing:
@@ -1157,9 +1157,9 @@ def build_records(
                 raise FileNotFoundError(message)
             add_warning(message)
             continue
-        if not sac_path.exists():
-            stats["skipped_missing_sac"] += 1
-            message = f"{slice_name}: missing SAC pseudo: {sac_path}"
+        if not ours_path.exists():
+            stats["skipped_missing_ours"] += 1
+            message = f"{slice_name}: missing Ours pseudo: {ours_path}"
             if not allow_partial:
                 raise FileNotFoundError(message)
             add_warning(message)
@@ -1230,7 +1230,7 @@ def build_records(
                 native_image_path=native_image_path,
                 gt_path=gt_path,
                 baseline_path=baseline_path,
-                sac_path=sac_path,
+                ours_path=ours_path,
                 label_mode=label_mode,
                 prompt_meta=prompt_meta,
                 geometry_meta=geometry_meta,
@@ -1285,16 +1285,16 @@ def inspect_sample(
     )
     gt_student = load_array_2d(record.gt_path, "gt")
     baseline_student = load_array_2d(record.baseline_path, "baseline")
-    sac_student = load_array_2d(record.sac_path, "sac")
-    baseline_student, sac_student = validate_same_shape(
-        gt_student, baseline_student, sac_student, strict
+    ours_student = load_array_2d(record.ours_path, "ours")
+    baseline_student, ours_student = validate_same_shape(
+        gt_student, baseline_student, ours_student, strict
     )
 
     if validate_labels:
         class_ids = set(int(value) for value in class_names)
         validate_label_values(gt_student, "GT", class_ids, record.slice_name)
         validate_label_values(baseline_student, "baseline pseudo", class_ids, record.slice_name)
-        validate_label_values(sac_student, "SAC pseudo", class_ids, record.slice_name)
+        validate_label_values(ours_student, "Ours pseudo", class_ids, record.slice_name)
 
     if student_image_rgb.shape[:2] != gt_student.shape:
         if strict:
@@ -1310,7 +1310,7 @@ def inspect_sample(
 
     # Metrics are always computed in the original student-label space.
     bm = quality_metrics(baseline_student, gt_student)
-    sm = quality_metrics(sac_student, gt_student)
+    sm = quality_metrics(ours_student, gt_student)
 
     instances = parse_instances(record.prompt_meta, prompt_space)
     image_source = "student_canvas"
@@ -1319,7 +1319,7 @@ def inspect_sample(
         image_rgb = student_image_rgb
         gt = gt_student
         baseline = baseline_student
-        sac = sac_student
+        ours = ours_student
         boxes = (
             map_boxes_to_student(
                 instances, record.geometry_meta, gt_student.shape, prompt_space
@@ -1335,7 +1335,7 @@ def inspect_sample(
             image_rgb = student_image_rgb
             gt = gt_student
             baseline = baseline_student
-            sac = sac_student
+            ours = ours_student
             boxes = (
                 map_boxes_to_student(
                     instances, record.geometry_meta, gt_student.shape, prompt_space
@@ -1371,7 +1371,7 @@ def inspect_sample(
             baseline = student_mask_to_native(
                 baseline_student, record.geometry_meta
             )
-            sac = student_mask_to_native(sac_student, record.geometry_meta)
+            ours = student_mask_to_native(ours_student, record.geometry_meta)
             boxes = (
                 map_boxes_to_native(
                     instances, record.geometry_meta, gt_student.shape, prompt_space
@@ -1403,7 +1403,7 @@ def inspect_sample(
         "image_source": image_source,
     }
     flatten_metrics("baseline", bm, metrics)
-    flatten_metrics("sac", sm, metrics)
+    flatten_metrics("ours", sm, metrics)
     metrics.update({
         "delta_dice": sm["dice_macro"] - bm["dice_macro"],
         "delta_iou": sm["iou_macro"] - bm["iou_macro"],
@@ -1414,14 +1414,14 @@ def inspect_sample(
         "delta_fragmentation": sm["fragmentation_score"] - bm["fragmentation_score"],
         "delta_far_fp": sm["far_fp_ratio"] - bm["far_fp_ratio"],
         "baseline_per_class_json": json.dumps(bm["per_class"], ensure_ascii=False),
-        "sac_per_class_json": json.dumps(sm["per_class"], ensure_ascii=False),
+        "ours_per_class_json": json.dumps(sm["per_class"], ensure_ascii=False),
     })
     return RenderedSample(
         record=record,
         image_rgb=image_rgb,
         gt=gt,
         baseline=baseline,
-        sac=sac,
+        ours=ours,
         boxes_student=boxes,
         class_names=class_names,
         metrics=metrics,
@@ -1523,26 +1523,26 @@ def sample_panels(sample: RenderedSample, overlay_alpha: float, error_alpha: flo
         sample.image_rgb,
         render_supervision(sample, overlay_alpha),
         overlay_segmentation(sample.image_rgb, sample.baseline, overlay_alpha),
-        overlay_segmentation(sample.image_rgb, sample.sac, overlay_alpha),
+        overlay_segmentation(sample.image_rgb, sample.ours, overlay_alpha),
         overlay_segmentation(sample.image_rgb, sample.gt, overlay_alpha),
         error_overlay(sample.image_rgb, sample.baseline, sample.gt, error_alpha),
-        error_overlay(sample.image_rgb, sample.sac, sample.gt, error_alpha),
+        error_overlay(sample.image_rgb, sample.ours, sample.gt, error_alpha),
     ]
 
 
 def metric_caption(m: Dict[str, Any]) -> str:
     return (
-        f"B Dice={m['baseline_dice_macro']:.3f} | SAC={m['sac_dice_macro']:.3f} | "
+        f"B Dice={m['baseline_dice_macro']:.3f} | Ours={m['ours_dice_macro']:.3f} | "
         f"Δ={m['delta_dice']:+.3f} | "
-        f"Ugt {m['baseline_unknown_on_gt']:.2f}→{m['sac_unknown_on_gt']:.2f} | "
-        f"FP {m['baseline_false_activation_ratio']:.3f}→{m['sac_false_activation_ratio']:.3f}"
+        f"Ugt {m['baseline_unknown_on_gt']:.2f}→{m['ours_unknown_on_gt']:.2f} | "
+        f"FP {m['baseline_false_activation_ratio']:.3f}→{m['ours_false_activation_ratio']:.3f}"
     )
 
 
 def class_legend_handles(samples: Sequence[RenderedSample]) -> List[Patch]:
     ids: Set[int] = set()
     for s in samples:
-        ids.update(get_class_ids(s.gt, s.baseline, s.sac))
+        ids.update(get_class_ids(s.gt, s.baseline, s.ours))
     handles = []
     names = samples[0].class_names if samples else {}
     for cid in sorted(ids):
@@ -1587,7 +1587,7 @@ def show_panel(ax: Any, img: np.ndarray, title: Optional[str] = None) -> None:
 
 def render_individual_figure(sample: RenderedSample, save_path: Path, overlay_alpha: float, error_alpha: float, dpi: int) -> None:
     panels = sample_panels(sample, overlay_alpha, error_alpha)
-    titles = ["Input", "Supervision", "Baseline pseudo", "SAC pseudo", "Ground truth", "Baseline error", "SAC error"]
+    titles = ["Input", "Supervision", "Baseline pseudo", "Ours pseudo", "Ground truth", "Baseline error", "Ours error"]
     fig, axes = plt.subplots(1, 7, figsize=(18.0, 3.45), constrained_layout=False)
     for ax, img, title in zip(axes, panels, titles):
         show_panel(ax, img, title)
@@ -1615,7 +1615,7 @@ def render_contact_sheet(
 ) -> None:
     if not samples:
         return
-    titles = ["Input", "Supervision", "Baseline pseudo", "SAC pseudo", "Ground truth", "Baseline error", "SAC error"]
+    titles = ["Input", "Supervision", "Baseline pseudo", "Ours pseudo", "Ground truth", "Baseline error", "Ours error"]
     nrows = len(samples)
     fig, axes = plt.subplots(nrows, 7, figsize=(17.6, 2.55 * nrows + 1.4), squeeze=False)
     for r, sample in enumerate(samples):
@@ -1727,7 +1727,7 @@ def select_diagnostic_groups(
         (
             "strong_improvement",
             box.sort_values(
-                ["delta_dice", "sac_dice_macro"],
+                ["delta_dice", "ours_dice_macro"],
                 ascending=[False, False],
             ).index,
         )
@@ -1738,27 +1738,27 @@ def select_diagnostic_groups(
     orders.append(("typical", typical_order))
     orders.append((
         "regression",
-        box.sort_values(["delta_dice", "sac_dice_macro"], ascending=[True, True]).index,
+        box.sort_values(["delta_dice", "ours_dice_macro"], ascending=[True, True]).index,
     ))
     orders.append((
         "difficult",
         box.sort_values(
-            ["sac_dice_macro", "sac_under_activation_ratio"],
+            ["ours_dice_macro", "ours_under_activation_ratio"],
             ascending=[True, False],
         ).index,
     ))
     orders.append((
         "fp_risk",
         box.sort_values(
-            ["delta_false_activation", "sac_far_fp_ratio", "sac_fp_over_pred_fg"],
+            ["delta_false_activation", "ours_far_fp_ratio", "ours_fp_over_pred_fg"],
             ascending=[False, False, False],
         ).index,
     ))
 
     uncertainty_score = (
-        box["sac_unknown_on_gt"].fillna(0)
-        + 0.10 * box["sac_fragmentation_score"].fillna(0)
-        + 0.50 * box["sac_tiny_fragment_ratio"].fillna(0)
+        box["ours_unknown_on_gt"].fillna(0)
+        + 0.10 * box["ours_fragmentation_score"].fillna(0)
+        + 0.50 * box["ours_tiny_fragment_ratio"].fillna(0)
     )
     orders.append(("unknown_fragmented", uncertainty_score.sort_values(ascending=False).index))
 
@@ -1806,7 +1806,7 @@ def summarize_dataset(
         "num_dice_tied": int((valid["delta_dice"] == 0).sum()),
         "improved_fraction": float((valid["delta_dice"] > 0).mean()) if len(valid) else np.nan,
         "mean_baseline_dice": float(valid["baseline_dice_macro"].mean()) if len(valid) else np.nan,
-        "mean_sac_dice": float(valid["sac_dice_macro"].mean()) if len(valid) else np.nan,
+        "mean_ours_dice": float(valid["ours_dice_macro"].mean()) if len(valid) else np.nan,
         "mean_delta_dice": float(valid["delta_dice"].mean()) if len(valid) else np.nan,
         "mean_delta_iou": float(valid["delta_iou"].mean()) if len(valid) else np.nan,
         "mean_delta_unknown_on_gt": float(valid["delta_unknown_on_gt"].mean()) if len(valid) else np.nan,
@@ -1835,7 +1835,7 @@ def render_dataset(
         baseline_fold_root=baseline_fold_root,
         method=args.method,
         baseline_name=args.baseline_pseudo_name,
-        sac_name=args.sac_pseudo_name,
+        ours_name=args.ours_pseudo_name,
         only_box=args.only_box,
         strict=args.strict,
         allow_partial=args.allow_partial,
@@ -1922,7 +1922,7 @@ def render_dataset(
         "fold_root": str(fold_root),
         "baseline_fold_root": str(baseline_fold_root),
         "baseline_pseudo_name": args.baseline_pseudo_name,
-        "sac_pseudo_name": args.sac_pseudo_name,
+        "ours_pseudo_name": args.ours_pseudo_name,
         "prompt_space": args.prompt_space,
         "display_mode": args.display_mode,
         "auto_grayscale": args.auto_grayscale,

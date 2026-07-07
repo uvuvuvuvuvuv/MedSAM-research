@@ -10,7 +10,7 @@ import numpy as np
 import pandas as pd
 
 
-METHOD_DEFAULT = "idea1_sac_medsam_final"
+METHOD_DEFAULT = "idea1_iterclean_bank_adaptshape_v43"
 
 HIGHER_IS_BETTER = {
     "coverage_non255",
@@ -21,7 +21,7 @@ HIGHER_IS_BETTER = {
     "iou_strict_255_as_bg",
     "dice_macro_strict",
     "iou_macro_strict",
-    "largest_component_ratio",
+    "empty_pred_correct",
 }
 
 LOWER_IS_BETTER = {
@@ -31,7 +31,7 @@ LOWER_IS_BETTER = {
     "under_fg_ratio",
     "unknown_on_fg_ratio",
     "unknown_on_bg_ratio",
-    "num_connected_components",
+    "empty_false_positive_ratio",
 }
 
 
@@ -143,11 +143,23 @@ def sample_metrics(
     gt_fg_count = int(gt_foreground.sum())
     correct_fg_count = int(correct_foreground.sum())
 
-    strict_dice = safe_div(2.0 * correct_fg_count, pred_fg_count + gt_fg_count)
-    strict_iou = safe_div(
-        correct_fg_count,
-        pred_fg_count + gt_fg_count - correct_fg_count,
-    )
+    has_gt_foreground = gt_fg_count > 0
+    has_pred_foreground = pred_fg_count > 0
+
+    # Foreground Dice/IoU are undefined for an empty-GT slice.
+    # Such slices are evaluated separately with empty-slice metrics.
+    if has_gt_foreground:
+        strict_dice = safe_div(
+            2.0 * correct_fg_count,
+            pred_fg_count + gt_fg_count,
+        )
+        strict_iou = safe_div(
+            correct_fg_count,
+            pred_fg_count + gt_fg_count - correct_fg_count,
+        )
+    else:
+        strict_dice = float("nan")
+        strict_iou = float("nan")
 
     per_class_dice: list[float] = []
     per_class_iou: list[float] = []
@@ -169,14 +181,36 @@ def sample_metrics(
         "fg_ratio": float(pred_foreground.mean()),
         "bg_ratio": float(pred_background.mean()),
         "unknown_ratio": float(pred_unknown.mean()),
+        "gt_fg_ratio": float(gt_foreground.mean()),
+        "has_gt_foreground": float(has_gt_foreground),
+        "has_pred_foreground": float(has_pred_foreground),
+        "empty_gt": float(not has_gt_foreground),
+        "empty_pred_correct": (
+            float(not has_pred_foreground)
+            if not has_gt_foreground
+            else float("nan")
+        ),
+        "empty_false_positive_ratio": (
+            float(pred_foreground.mean())
+            if not has_gt_foreground
+            else float("nan")
+        ),
         "coverage_non255": float(certain.mean()),
         "certain_acc": safe_div(int(correct_certain.sum()), int(certain.sum())),
         "fg_precision": safe_div(correct_fg_count, pred_fg_count),
         "fg_recall_strict": safe_div(correct_fg_count, gt_fg_count),
         "dice_strict_255_as_bg": strict_dice,
         "iou_strict_255_as_bg": strict_iou,
-        "dice_macro_strict": float(np.mean(per_class_dice)) if per_class_dice else 0.0,
-        "iou_macro_strict": float(np.mean(per_class_iou)) if per_class_iou else 0.0,
+        "dice_macro_strict": (
+            float(np.mean(per_class_dice))
+            if per_class_dice
+            else float("nan")
+        ),
+        "iou_macro_strict": (
+            float(np.mean(per_class_iou))
+            if per_class_iou
+            else float("nan")
+        ),
         "false_fg_ratio": safe_div(int(false_foreground.sum()), pred_fg_count),
         "wrong_class_ratio": safe_div(int(wrong_class.sum()), pred_fg_count),
         "under_fg_ratio": safe_div(int(under_foreground.sum()), gt_fg_count),
@@ -230,18 +264,21 @@ def build_per_class_summary(
     return pd.DataFrame(rows)
 
 
-def paired_delta_summary(df: pd.DataFrame, metric_columns: list[str]) -> pd.DataFrame:
+def paired_delta_summary(
+    df: pd.DataFrame,
+    metric_columns: list[str],
+    baseline_name: str,
+    ours_name: str,
+) -> pd.DataFrame:
     valid = df[(df["missing"] == 0) & (df["bad_label"] == 0)].copy()
     pivot = valid.pivot(index="slice_name", columns="method", values=metric_columns)
-    baseline_name = "baseline_box_only"
-    sac_name = "sac_medsam_final"
 
     rows: list[dict[str, Any]] = []
     for metric in metric_columns:
-        if baseline_name not in pivot[metric].columns or sac_name not in pivot[metric].columns:
+        if baseline_name not in pivot[metric].columns or ours_name not in pivot[metric].columns:
             continue
 
-        delta = pivot[metric][sac_name] - pivot[metric][baseline_name]
+        delta = pivot[metric][ours_name] - pivot[metric][baseline_name]
         if metric in HIGHER_IS_BETTER:
             improvement = delta
             direction = "higher_is_better"
@@ -256,10 +293,10 @@ def paired_delta_summary(df: pd.DataFrame, metric_columns: list[str]) -> pd.Data
             {
                 "metric": metric,
                 "direction": direction,
-                "delta_mean_sac_minus_baseline": float(delta.mean()),
-                "delta_median_sac_minus_baseline": float(delta.median()),
-                "sac_better_count": int((improvement > 0).sum()) if direction != "descriptive_only" else np.nan,
-                "sac_worse_count": int((improvement < 0).sum()) if direction != "descriptive_only" else np.nan,
+                "delta_mean_ours_minus_baseline": float(delta.mean()),
+                "delta_median_ours_minus_baseline": float(delta.median()),
+                "ours_better_count": int((improvement > 0).sum()) if direction != "descriptive_only" else np.nan,
+                "ours_worse_count": int((improvement < 0).sum()) if direction != "descriptive_only" else np.nan,
                 "tie_count": int((improvement == 0).sum()) if direction != "descriptive_only" else np.nan,
                 "paired_samples": int(delta.notna().sum()),
             }
@@ -270,11 +307,21 @@ def paired_delta_summary(df: pd.DataFrame, metric_columns: list[str]) -> pd.Data
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Compare baseline and SAC tri-state pseudo-labels for binary or multi-class datasets."
+        description="Compare baseline and ours tri-state pseudo-labels for binary or multi-class datasets."
     )
     parser.add_argument("--fold_root", type=Path, required=True)
     parser.add_argument("--baseline_tri_dir", type=Path, required=True)
-    parser.add_argument("--sac_tri_dir", type=Path, required=True)
+    parser.add_argument("--ours_tri_dir", type=Path, required=True)
+    parser.add_argument(
+        "--baseline_name",
+        default="baseline_box_only",
+        help="Method name written to CSV for the frozen baseline.",
+    )
+    parser.add_argument(
+        "--ours_name",
+        default="iterclean_bank_adaptshape_v43",
+        help="Method name written to CSV for the proposed method.",
+    )
     parser.add_argument("--method", default=METHOD_DEFAULT)
     parser.add_argument("--space", choices=("teacher", "student"), default="teacher")
     parser.add_argument("--only_box", action="store_true")
@@ -291,6 +338,12 @@ def main() -> None:
         "fg_ratio",
         "bg_ratio",
         "unknown_ratio",
+        "gt_fg_ratio",
+        "has_gt_foreground",
+        "has_pred_foreground",
+        "empty_gt",
+        "empty_pred_correct",
+        "empty_false_positive_ratio",
         "coverage_non255",
         "certain_acc",
         "fg_precision",
@@ -326,8 +379,8 @@ def main() -> None:
         gt = load_mask(resolve_path(args.fold_root, item, gt_key))
 
         for method_name, tri_dir in (
-            ("baseline_box_only", args.baseline_tri_dir),
-            ("sac_medsam_final", args.sac_tri_dir),
+            (args.baseline_name, args.baseline_tri_dir),
+            (args.ours_name, args.ours_tri_dir),
         ):
             tri_path = tri_dir / slice_name
             base_row: dict[str, Any] = {
@@ -362,7 +415,12 @@ def main() -> None:
     df.to_csv(args.out_csv, index=False)
 
     valid_df = df[(df["missing"] == 0) & (df["bad_label"] == 0)].copy()
-    paired = paired_delta_summary(df, metric_columns)
+    paired = paired_delta_summary(
+        df,
+        metric_columns,
+        baseline_name=args.baseline_name,
+        ours_name=args.ours_name,
+    )
     paired_path = args.out_csv.with_name(args.out_csv.stem + "_paired_delta.csv")
     paired.to_csv(paired_path, index=False)
 
@@ -381,7 +439,7 @@ def main() -> None:
         print("\nMean metrics by method:")
         print(valid_df.groupby("method")[metric_columns].mean().T.to_string())
     if not paired.empty:
-        print("\nPaired SAC - baseline summary:")
+        print("\nPaired Ours - baseline summary:")
         print(paired.to_string(index=False))
 
 

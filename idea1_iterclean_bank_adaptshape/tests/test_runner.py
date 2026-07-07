@@ -302,11 +302,11 @@ class TestGetScriptPaths(unittest.TestCase):
         )
         self.assertEqual(
             paths["train"].name,
-            "03_train_medsam_sac.py",
+            "03_train_medsam_full_only.py",
         )
         self.assertEqual(
             paths["pseudo"].name,
-            "04_generate_pseudo_sac.py",
+            "04_generate_pseudo_bank_adaptshape.py",
         )
         self.assertEqual(
             paths["select"].name,
@@ -1118,7 +1118,7 @@ class TestRunner03CliContract(unittest.TestCase):
     def setUp(self):
         import importlib
         self.t03 = importlib.import_module(
-            "idea1_iterclean_bank_adaptshape.03_train_medsam_sac"
+            "idea1_iterclean_bank_adaptshape.03_train_medsam_full_only"
         )
         self.parser = self.t03.build_parser()
         self._tmpdir_obj = __import__("tempfile").mkdtemp(prefix="test_03_ctr_")

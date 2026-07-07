@@ -113,16 +113,16 @@ def load_mask(path: Path) -> np.ndarray:
 
 def build_medsam(
     base_checkpoint: Path,
-    sac_checkpoint: Path,
+    finetuned_checkpoint: Path,
     device: torch.device,
 ):
     from segment_anything import sam_model_registry
 
     model = sam_model_registry[MODEL_TYPE](checkpoint=str(base_checkpoint))
-    payload = torch.load(sac_checkpoint, map_location="cpu")
+    payload = torch.load(finetuned_checkpoint, map_location="cpu")
     state_dict = payload["model"] if isinstance(payload, dict) and "model" in payload else payload
     missing, unexpected = model.load_state_dict(state_dict, strict=False)
-    print(f"[load SAC] missing={len(missing)} unexpected={len(unexpected)}")
+    print(f"[load fine-tuned MedSAM] missing={len(missing)} unexpected={len(unexpected)}")
     model.to(device)
     model.eval()
     return model
@@ -1181,7 +1181,7 @@ def process_dataset(args: argparse.Namespace, dataset: str) -> None:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "Generate teacher- and student-space tri-state SAC "
+            "Generate teacher- and student-space tri-state pseudo-labels "
             "pseudo-labels without loading Box-sample GT."
         )
     )

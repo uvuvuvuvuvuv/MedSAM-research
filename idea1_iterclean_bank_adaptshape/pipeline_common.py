@@ -135,6 +135,9 @@ def build_fold_paths(
     if medsam_ft_root is not None:
         train_root = Path(medsam_ft_root) / method / dataset / fold / round_tag
         paths["train_root"] = train_root
+        # Legacy artifact filenames retained for compatibility with
+        # completed/frozen v4.3 runs. The current method uses full-only
+        # supervised MedSAM fine-tuning and does not use SAC losses.
         paths["train_last_path"] = train_root / "medsam_sac_last.pth"
         paths["train_ema_path"] = train_root / "medsam_sac_ema.pth"
         paths["train_log_path"] = train_root / f"medsam_ft_log_{run_id}.csv"

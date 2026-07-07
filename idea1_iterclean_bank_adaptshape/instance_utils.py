@@ -1,6 +1,6 @@
 """Shared instance-level GT matching utilities.
 
-Used by both 02_build_support_template and 03_train_medsam_sac to avoid
+Used by both 02_build_support_template and 03_train_medsam_full_only to avoid
 duplicated connected-component / bbox-IoU matching logic.
 """
 
@@ -162,7 +162,7 @@ def load_instance_target(
     """Load a GT *.npy* file and return a *(1, 1, H, W)* torch float tensor
     for the matched instance.
 
-    Convenience wrapper used by 03_train_medsam_sac.
+    Convenience wrapper used by 03_train_medsam_full_only.
     """
     gt = load_gt_array(path)
     mask = match_instance_mask(gt, label_id, bbox, component_id)
