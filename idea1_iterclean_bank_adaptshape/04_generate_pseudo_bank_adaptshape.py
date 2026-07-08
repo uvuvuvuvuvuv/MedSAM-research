@@ -734,11 +734,47 @@ def generate_one_slice(
                 f"gamma={args.gamma}"
             )
 
+        # Sanitize score maps before fusion.
+        #
+        # Important: in NumPy, 0.0 * np.nan is still np.nan.
+        # Therefore, merely setting effective_beta=0 is not sufficient when
+        # the adaptive shape map contains NaNs. Without this sanitization,
+        # foreground/background/unknown comparisons all become False and
+        # Box pseudo-labels collapse to all-background.
+        p_score = np.nan_to_num(
+            p_np,
+            nan=0.0,
+            posinf=1.0,
+            neginf=0.0,
+        ).astype(np.float32)
+        q_score = np.nan_to_num(
+            q_np,
+            nan=0.0,
+            posinf=1.0,
+            neginf=0.0,
+        ).astype(np.float32)
+
+        if effective_beta <= 0.0:
+            a_score = np.zeros_like(p_score, dtype=np.float32)
+        else:
+            a_score = np.nan_to_num(
+                a_np,
+                nan=0.0,
+                posinf=1.0,
+                neginf=0.0,
+            ).astype(np.float32)
+
         score = (
-            args.alpha * p_np
-            + effective_beta * a_np
-            + args.gamma * q_np
+            args.alpha * p_score
+            + effective_beta * a_score
+            + args.gamma * q_score
         ) / effective_weight_sum
+        score = np.nan_to_num(
+            score,
+            nan=0.0,
+            posinf=1.0,
+            neginf=0.0,
+        ).astype(np.float32)
 
         foreground = box_mask & (score >= args.tau_high)
         background = box_mask & (score <= args.tau_low)
@@ -772,9 +808,9 @@ def generate_one_slice(
             label_id,
         )
 
-        p_values.append(p_np[box_mask])
-        q_values.append(q_np[box_mask])
-        a_values.append(a_np[box_mask])
+        p_values.append(p_score[box_mask])
+        q_values.append(q_score[box_mask])
+        a_values.append(a_score[box_mask])
         box_area = max(int(box_mask.sum()), 1)
         weak_030_040.append(
             float(((p_np > 0.30) & (p_np < 0.40) & box_mask).sum()) / box_area
