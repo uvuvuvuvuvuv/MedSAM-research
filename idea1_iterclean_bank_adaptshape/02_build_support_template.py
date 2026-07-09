@@ -1017,6 +1017,16 @@ def process_dataset(
                 cand_rows, cand_cols = np.where(candidate_mask)
                 n_candidates = int(cand_rows.size)
 
+
+                # Robust fallback for small/thin organs:
+                # token-level bbox masks can miss all positive coverage cells.
+                # If bbox-constrained fallback is empty, use all positive
+                # instance-coverage tokens rather than aborting bank construction.
+                if n_candidates == 0:
+                    candidate_mask = inst_coverage > 0
+                    cand_rows, cand_cols = np.where(candidate_mask)
+                    n_candidates = int(len(cand_rows))
+
                 if n_candidates == 0:
                     max_cov = float(inst_coverage.max())
                     raise RuntimeError(
