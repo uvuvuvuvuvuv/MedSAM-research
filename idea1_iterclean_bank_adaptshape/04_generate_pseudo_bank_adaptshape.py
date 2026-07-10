@@ -602,6 +602,300 @@ def connected_component_stats(
     return total_components, mean_largest_ratio, present_classes
 
 
+
+def select_regions_by_fusion_mode(
+    *,
+    fusion_mode: str,
+    box_mask: np.ndarray,
+    p_score: np.ndarray,
+    prior_score: np.ndarray,
+    tau_low: float,
+    tau_high: float,
+    p_only_threshold: float,
+    p_weak_low: float,
+    p_strong_foreground: float,
+    weak_prior_threshold: float,
+) -> tuple[
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    dict[str, float],
+]:
+    """
+    Build instance foreground and unknown regions.
+
+    global:
+        Reproduce the original whole-Box fusion.
+
+    p_only:
+        Use only the fine-tuned MedSAM probability.
+
+    weak_gate:
+        Protect strong MedSAM foreground and use
+        Bank/Shape priors only in the weak-response region.
+    """
+    box_mask = np.asarray(
+        box_mask,
+        dtype=bool,
+    )
+    p_score = np.asarray(
+        p_score,
+        dtype=np.float32,
+    )
+    prior_score = np.asarray(
+        prior_score,
+        dtype=np.float32,
+    )
+
+    if p_score.shape != box_mask.shape:
+        raise ValueError(
+            "p_score shape mismatch: "
+            f"{p_score.shape} vs {box_mask.shape}"
+        )
+
+    if prior_score.shape != box_mask.shape:
+        raise ValueError(
+            "prior_score shape mismatch: "
+            f"{prior_score.shape} vs {box_mask.shape}"
+        )
+
+    if fusion_mode not in {
+        "global",
+        "p_only",
+        "weak_gate",
+    }:
+        raise ValueError(
+            f"Unsupported fusion_mode={fusion_mode!r}"
+        )
+
+    values = {
+        "tau_low": tau_low,
+        "tau_high": tau_high,
+        "p_only_threshold": p_only_threshold,
+        "p_weak_low": p_weak_low,
+        "p_strong_foreground": (
+            p_strong_foreground
+        ),
+        "weak_prior_threshold": (
+            weak_prior_threshold
+        ),
+    }
+
+    for name, value in values.items():
+        if not 0.0 <= float(value) <= 1.0:
+            raise ValueError(
+                f"{name} must be in [0, 1], "
+                f"got {value}"
+            )
+
+    if float(tau_low) >= float(tau_high):
+        raise ValueError(
+            "tau_low must be smaller than tau_high: "
+            f"{tau_low} >= {tau_high}"
+        )
+
+    if (
+        float(p_weak_low)
+        >= float(p_strong_foreground)
+    ):
+        raise ValueError(
+            "p_weak_low must be smaller than "
+            "p_strong_foreground: "
+            f"{p_weak_low} >= "
+            f"{p_strong_foreground}"
+        )
+
+    empty = np.zeros_like(
+        box_mask,
+        dtype=bool,
+    )
+
+    if fusion_mode == "global":
+        # Original v4.4 behavior:
+        # high score    -> foreground
+        # middle score  -> unknown
+        # low score     -> hard background 0
+        foreground = (
+            box_mask
+            & (
+                prior_score
+                >= float(tau_high)
+            )
+        )
+
+        unknown = (
+            box_mask
+            & (
+                prior_score
+                > float(tau_low)
+            )
+            & (
+                prior_score
+                < float(tau_high)
+            )
+        )
+
+        strong_foreground = (
+            box_mask
+            & (
+                p_score
+                >= float(
+                    p_strong_foreground
+                )
+            )
+        )
+
+        weak_region = (
+            box_mask
+            & (
+                p_score
+                >= float(p_weak_low)
+            )
+            & (
+                p_score
+                < float(
+                    p_strong_foreground
+                )
+            )
+        )
+
+        weak_promoted = empty
+        guard_score = prior_score
+
+    elif fusion_mode == "p_only":
+        foreground = (
+            box_mask
+            & (
+                p_score
+                >= float(
+                    p_only_threshold
+                )
+            )
+        )
+
+        # Do not create hard background inside the Box.
+        unknown = (
+            box_mask
+            & (~foreground)
+        )
+
+        strong_foreground = foreground.copy()
+
+        weak_region = (
+            box_mask
+            & (
+                p_score
+                < float(
+                    p_only_threshold
+                )
+            )
+        )
+
+        weak_promoted = empty
+        guard_score = p_score
+
+    else:
+        # Strong MedSAM foreground is protected.
+        strong_foreground = (
+            box_mask
+            & (
+                p_score
+                >= float(
+                    p_strong_foreground
+                )
+            )
+        )
+
+        # Priors are allowed to operate only here.
+        weak_region = (
+            box_mask
+            & (
+                p_score
+                >= float(p_weak_low)
+            )
+            & (
+                p_score
+                < float(
+                    p_strong_foreground
+                )
+            )
+        )
+
+        weak_promoted = (
+            weak_region
+            & (
+                prior_score
+                >= float(
+                    weak_prior_threshold
+                )
+            )
+        )
+
+        foreground = (
+            strong_foreground
+            | weak_promoted
+        )
+
+        # First diagnosis version:
+        # all unconfirmed Box pixels remain unknown.
+        unknown = (
+            box_mask
+            & (~foreground)
+        )
+
+        guard_score = prior_score
+
+    foreground &= box_mask
+    unknown &= box_mask
+    unknown &= ~foreground
+
+    box_area = max(
+        int(box_mask.sum()),
+        1,
+    )
+    weak_area = max(
+        int(weak_region.sum()),
+        1,
+    )
+
+    mode_stats = {
+        "strong_fg_ratio": float(
+            strong_foreground.sum()
+            / box_area
+        ),
+        "weak_region_ratio": float(
+            weak_region.sum()
+            / box_area
+        ),
+        "weak_promoted_ratio_in_box": float(
+            weak_promoted.sum()
+            / box_area
+        ),
+        "weak_promoted_ratio_in_weak": float(
+            weak_promoted.sum()
+            / weak_area
+        ),
+        "instance_unknown_ratio": float(
+            unknown.sum()
+            / box_area
+        ),
+        "instance_hard_bg_ratio": float(
+            (
+                box_mask
+                & (~foreground)
+                & (~unknown)
+            ).sum()
+            / box_area
+        ),
+    }
+
+    return (
+        foreground,
+        unknown,
+        guard_score,
+        mode_stats,
+    )
+
 def generate_one_slice(
     model,
     image_tensor: torch.Tensor,
@@ -776,25 +1070,47 @@ def generate_one_slice(
             neginf=0.0,
         ).astype(np.float32)
 
-        foreground = box_mask & (score >= args.tau_high)
-        background = box_mask & (score <= args.tau_low)
-        unknown = (
-            box_mask
-            & (score > args.tau_low)
-            & (score < args.tau_high)
+        foreground, unknown, guard_score, _mode_stats = (
+            select_regions_by_fusion_mode(
+                fusion_mode=args.fusion_mode,
+                box_mask=box_mask,
+                p_score=p_score,
+                prior_score=score,
+                tau_low=args.tau_low,
+                tau_high=args.tau_high,
+                p_only_threshold=(
+                    args.p_only_threshold
+                ),
+                p_weak_low=args.p_weak_low,
+                p_strong_foreground=(
+                    args.p_strong_foreground
+                ),
+                weak_prior_threshold=(
+                    args.weak_prior_threshold
+                ),
+            )
         )
 
-        guard_enabled = (
+        base_guard_enabled = (
             bool(str(prompt_meta.get("dataset_name", "")).strip().lower() in {"acdc", "prostate158", "btcv"})
             if args.nonempty_box_guard is None
             else bool(args.nonempty_box_guard)
+        )
+
+        # Diagnosis contract:
+        # preserve the historical guard only for global mode.
+        # p_only and weak_gate must not manufacture foreground
+        # outside their own response rules.
+        guard_enabled = (
+            args.fusion_mode == "global"
+            and base_guard_enabled
         )
 
         if guard_enabled and not foreground.any():
             foreground, unknown, _ = apply_nonempty_box_guard(
                 foreground,
                 unknown,
-                score,
+                guard_score,
                 box_mask,
                 tau_low=args.tau_low,
                 top_fraction=args.nonempty_guard_top_fraction,
@@ -1464,6 +1780,55 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Score <= tau_low → background (0).")
     parser.add_argument("--tau_high", type=float, default=0.70,
                         help="Score >= tau_high → foreground (label_id).")
+    parser.add_argument(
+        "--fusion_mode",
+        type=str,
+        choices=[
+            "global",
+            "p_only",
+            "weak_gate",
+        ],
+        default="global",
+        help=(
+            "Pseudo-label fusion strategy."
+        ),
+    )
+    parser.add_argument(
+        "--p_only_threshold",
+        type=float,
+        default=0.50,
+        help=(
+            "Foreground threshold for p_only mode."
+        ),
+    )
+    parser.add_argument(
+        "--p_weak_low",
+        type=float,
+        default=0.30,
+        help=(
+            "Lower probability boundary of the "
+            "MedSAM weak-response region."
+        ),
+    )
+    parser.add_argument(
+        "--p_strong_foreground",
+        type=float,
+        default=0.70,
+        help=(
+            "MedSAM probability above which "
+            "foreground is protected."
+        ),
+    )
+    parser.add_argument(
+        "--weak_prior_threshold",
+        type=float,
+        default=0.50,
+        help=(
+            "Fusion-score threshold for promoting "
+            "weak-response pixels."
+        ),
+    )
+
     parser.add_argument(
         "--adaptive_shape_reliability",
         action=argparse.BooleanOptionalAction,
