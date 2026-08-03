@@ -1,0 +1,51 @@
+{
+  "method": {
+    "method_id": "idea1_hard_full_medsam_ft",
+    "parent_method": "frozen_baseline_v1"
+  },
+  "selection": {
+    "seed": 2026,
+    "difficulty_iou_threshold": 0.5,
+    "two_d": {
+      "round0_random_images": 5,
+      "add_per_round": 5,
+      "max_full_images": 20
+    },
+    "three_d": {
+      "round0_random_cases": 1,
+      "add_per_round": 1,
+      "max_full_cases_absolute": 5,
+      "max_full_cases_ratio": 0.05,
+      "ratio_rounding": "ceil",
+      "worst_slice_fraction": 0.2
+    }
+  },
+  "medsam_finetune": {
+    "trainable": "mask_decoder",
+    "optimizer": "adamw",
+    "lr": 1e-05,
+    "weight_decay": 0.01,
+    "effective_batch_size": 2,
+    "physical_microbatch": 1,
+    "amp": true,
+    "grad_clip_norm": 1.0,
+    "dice_weight": 1.0,
+    "bce_weight": 1.0,
+    "scheduler": "none",
+    "augmentation": "none",
+    "steps_2d_per_round": 300,
+    "steps_3d_per_round": 1000,
+    "resume_previous_round": true
+  },
+  "pseudo": {
+    "contract": "frozen_baseline_generate_pseudo_labels",
+    "probability_threshold": 0.5,
+    "outside_box_value": 0,
+    "unknown_value": 255,
+    "conflict_value": 255,
+    "empty_3d_slice_value": 0
+  },
+  "student": {
+    "inherit_frozen_baseline_hyperparameters": true
+  }
+}

@@ -76,3 +76,45 @@ Thumbs.db
 
 # Deprecated local archive
 /nouse/
+
+# BEGIN IDEA1 GENERATED FILES
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+
+data/processed/
+work_dir/
+formal_runs/
+student_views/
+pseudo_student/
+pseudo_teacher/
+pred_test/
+eval_2d/
+eval_3d/
+logs/
+_archive/
+
+*.pth
+*.pt
+*.ckpt
+*.safetensors
+*.onnx
+*.npy
+*.npz
+*.nii
+*.nii.gz
+*.log
+*.tmp
+*.bak
+*.bak*
+*.rej
+
+.vscode/
+.idea/
+.claude/
+CLAUDE.local.md
+fold0_tree.txt
+manifest_head.txt
+label_meta_dump.txt
+# END IDEA1 GENERATED FILES
