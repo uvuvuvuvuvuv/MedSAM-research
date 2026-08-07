@@ -36,6 +36,15 @@ def main() -> None:
     parser.add_argument("--method", default=METHOD_DEFAULT)
     parser.add_argument("--selection", type=Path)
     parser.add_argument("--checkpoint", type=Path, required=True)
+    parser.add_argument(
+        "--pseudo_protocol",
+        default="student_v2_probability_arbitration",
+        choices=["student_v2_probability_arbitration"],
+        help=(
+            "Locked V2 tri-pseudo protocol: original refined "
+            "MedSAM support + pixel-probability multiclass arbitration."
+        ),
+    )
     parser.add_argument("--python", default=sys.executable)
     parser.add_argument("--overwrite", action="store_true")
     args = parser.parse_args()
@@ -125,7 +134,17 @@ def main() -> None:
         "baseline_generator": str(generator),
         "generation_view": str(generation_fold),
         "outputs": outputs,
-        "contract": "frozen baseline generator; canonical box-constrained tri-state labels",
+        "pseudo_protocol": args.pseudo_protocol,
+        "contract": {
+            "foreground_support": "selected_refined_medsam_best_mask",
+            "probability_source": "same_selected_multimask_candidate",
+            "same_class_overlap": "support_or_probability_max",
+            "cross_class_overlap": "pixel_probability_argmax",
+            "numerical_tie": 255,
+            "inside_box_unconfirmed": 255,
+            "outside_box_union": 0,
+            "additional_margin_threshold": None,
+        },
     }
     atomic_save_json(summary, args.fold_root / "meta" / f"final_box_pseudo_{args.method}.json")
     print(json.dumps(summary, indent=2))

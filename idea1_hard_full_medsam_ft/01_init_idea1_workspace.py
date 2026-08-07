@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 from pathlib import Path
 
 from idea1_common import (
@@ -71,18 +72,122 @@ def main() -> None:
         spacing_normalization = normalize_workspace_spacing_metadata(idea_fold)
         manifest = load_manifest(idea_fold)
         train = train_items(manifest)
-    train_cases = sorted({get_case_id(x, required=True) for x in train}) if is_3d else []
+    train_cases = sorted(
+        {get_case_id(x, required=True) for x in train}
+    ) if is_3d else []
+
+    # ======================================================
+    # Active-learning V2 annotation budget
+    #
+    # Per-round annotation unit:
+    #   max(ceil(1% * N), 5)
+    #
+    # 2D unit = image
+    # 3D unit = case
+    #
+    # For 3D, the cumulative Full-case annotation budget
+    # is 5% of all train cases, rounded UP to the nearest
+    # whole case because case-level annotation is indivisible.
+    # ======================================================
+
+    annotation_unit_count = (
+        len(train_cases)
+        if is_3d
+        else len(train)
+    )
+
+    if annotation_unit_count <= 0:
+        raise RuntimeError(
+            "No train annotation units were found."
+        )
+
+    requested_round_quota = max(
+        int(math.ceil(
+            0.01 * annotation_unit_count
+        )),
+        5,
+    )
+
+    requested_round_quota = min(
+        requested_round_quota,
+        annotation_unit_count,
+    )
+
+    # ======================================================
+    # Active Learning V2 cumulative Full budget
+    #
+    # BOTH 2D and 3D use a cumulative 5% annotation budget.
+    #
+    # 2D annotation unit = image
+    # 3D annotation unit = case
+    #
+    # Because annotation units are indivisible, the 5%
+    # budget is rounded UP to the nearest whole unit.
+    # ======================================================
+
+    max_full = max(
+        1,
+        int(math.ceil(
+            0.05 * annotation_unit_count
+        )),
+    )
+
+    # The actual Round0 / per-round quota can never exceed
+    # the cumulative 5% annotation budget.
+    effective_round_quota = min(
+        requested_round_quota,
+        max_full,
+    )
+
     budget = {
+        "budget_version": "active_learning_v2",
         "dataset": args.dataset,
         "fold": args.fold,
         "method": args.method,
         "is_3d": is_3d,
+
+        "annotation_unit": (
+            "case" if is_3d else "image"
+        ),
+
         "num_train_slices_or_images": len(train),
         "num_train_cases": len(train_cases),
-        "round0": 1 if is_3d else 5,
-        "add_per_round": 1 if is_3d else 5,
-        "max_full": compute_3d_budget(len(train_cases)) if is_3d else min(20, len(train)),
-        "three_d_formula": "max(1,min(5,ceil(0.05*N_train_cases)))" if is_3d else None,
+        "num_annotation_units": annotation_unit_count,
+
+        "per_round_ratio": 0.01,
+        "minimum_per_round": 5,
+        "rounding_per_round": "ceil",
+        "requested_round_quota": requested_round_quota,
+
+        "round0": effective_round_quota,
+        "add_per_round": effective_round_quota,
+
+        "max_full": max_full,
+
+        # Unified 2D/3D cumulative annotation budget.
+        "cumulative_full_ratio": 0.05,
+        "cumulative_cap_rounding": "ceil",
+        "cumulative_formula": (
+            "max(1,ceil(0.05*N_annotation_units))"
+        ),
+
+        # Retained for backward-compatible metadata.
+        "three_d_max_ratio": (
+            0.05 if is_3d else None
+        ),
+        "three_d_cap_rounding": (
+            "ceil" if is_3d else None
+        ),
+        "three_d_formula": (
+            "max(1,ceil(0.05*N_train_cases))"
+            if is_3d
+            else None
+        ),
+
+        "stop_iou_threshold": 0.5,
+        "convergence_rule": (
+            "all_remaining_gt_targets_iou_ge_0.5"
+        ),
     }
     atomic_save_json(budget, idea_fold / "meta" / f"annotation_budget_{args.method}.json")
 

@@ -25,6 +25,11 @@ def main() -> None:
     parser.add_argument("--final_round", type=int, required=True)
     parser.add_argument("--method", default=METHOD_DEFAULT)
     parser.add_argument("--checkpoint", type=Path)
+    parser.add_argument(
+        "--pseudo_protocol",
+        default="student_v2_probability_arbitration",
+        choices=["student_v2_probability_arbitration"],
+    )
     parser.add_argument("--overwrite", action="store_true")
     args = parser.parse_args()
 
@@ -35,7 +40,9 @@ def main() -> None:
     commands = [
         [python, str(root / "07_generate_method_tri_pseudo.py"), "--repo_root", str(args.repo_root),
          "--fold_root", str(args.fold_root), "--dataset", args.dataset, "--fold", args.fold,
-         "--final_round", str(args.final_round), "--method", args.method, "--checkpoint", str(checkpoint)],
+         "--final_round", str(args.final_round), "--method", args.method,
+         "--checkpoint", str(checkpoint),
+         "--pseudo_protocol", args.pseudo_protocol],
         [python, str(root / "08_assemble_method_supervision.py"), "--fold_root", str(args.fold_root),
          "--dataset", args.dataset, "--final_round", str(args.final_round), "--method", args.method],
         [python, str(root / "09_build_student_view.py"), "--fold_root", str(args.fold_root),

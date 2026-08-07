@@ -34,6 +34,12 @@ from segment_anything import sam_model_registry, SamPredictor
 
 from utils.stage_timer_utils import StageTimer
 
+from idea1_hard_full_medsam_ft.multiclass_resolver_v2 import (
+    aggregate_same_class_evidence,
+    resolve_multiclass_evidence,
+    sigmoid_np,
+)
+
 
 DEFAULT_BASE_DIR = "/storage/baiyuting/data/MedSAM-main/data"
 DEFAULT_CHECKPOINT = "/storage/baiyuting/data/MedSAM-main/work_dir/MedSAM/medsam_vit_b.pth"
@@ -79,6 +85,8 @@ class Proposal:
     label_id: int
     score: float
     best_mask: np.ndarray
+    best_probability: np.ndarray
+    best_model_score: float
     teacher_box: np.ndarray
     native_box: Optional[np.ndarray]
     point_coords: Optional[np.ndarray] = None
@@ -571,46 +579,147 @@ def select_and_build_proposal(
     teacher_hw: Tuple[int, int],
     is_multiclass: bool,
 ) -> Optional[Proposal]:
+    """
+    Build one formal MedSAM proposal.
+
+    Student V2 change:
+      - request pixel logits with return_logits=True;
+      - preserve the original foreground decision logits > 0,
+        which is equivalent to sigmoid probability > 0.5;
+      - preserve the original morphology, box constraint and
+        fused proposal ranking;
+      - retain the probability map belonging to EXACTLY the
+        same multimask candidate selected as best_mask.
+
+    Therefore probability does not redefine foreground.
+    It is only additional evidence for cross-class arbitration.
+    """
     h, w = teacher_hw
-    box = _clip_box_to_image(teacher_box, w, h)
-    box_mask = box_to_mask_xyxy(box, h, w)
-    box_area = max(1.0, float(box_mask.sum()))
+
+    box = _clip_box_to_image(
+        teacher_box,
+        w,
+        h,
+    )
+    box_mask = box_to_mask_xyxy(
+        box,
+        h,
+        w,
+    )
+    box_area = max(
+        1.0,
+        float(box_mask.sum()),
+    )
+
     points = None
     labels = None
-    if point_coords is not None and point_labels is not None and len(point_coords) > 0:
-        points = _clip_points_to_image(point_coords, w=w, h=h)
-        labels = point_labels.astype(np.int32)
 
-    if points is not None and labels is not None and len(points) > 0:
-        masks, scores, _ = predictor.predict(
+    if (
+        point_coords is not None
+        and point_labels is not None
+        and len(point_coords) > 0
+    ):
+        points = _clip_points_to_image(
+            point_coords,
+            w=w,
+            h=h,
+        )
+        labels = point_labels.astype(
+            np.int32
+        )
+
+    if (
+        points is not None
+        and labels is not None
+        and len(points) > 0
+    ):
+        mask_logits, scores, _ = predictor.predict(
             point_coords=points.astype(np.float32),
             point_labels=labels.astype(np.int32),
             box=box.astype(np.float32),
             multimask_output=True,
+            return_logits=True,
         )
     else:
-        masks, scores, _ = predictor.predict(box=box.astype(np.float32), multimask_output=True)
-    masks = np.asarray(masks)
-    scores = np.asarray(scores).reshape(-1)
+        mask_logits, scores, _ = predictor.predict(
+            box=box.astype(np.float32),
+            multimask_output=True,
+            return_logits=True,
+        )
 
-    if masks.ndim == 2:
-        masks = masks[None, ...]
+    mask_logits = np.asarray(
+        mask_logits,
+        dtype=np.float32,
+    )
+    scores = np.asarray(
+        scores,
+    ).reshape(-1)
+
+    if mask_logits.ndim == 2:
+        mask_logits = mask_logits[
+            None,
+            ...,
+        ]
+
+    if mask_logits.shape[0] != scores.shape[0]:
+        raise RuntimeError(
+            "MedSAM multimask output mismatch: "
+            f"logits={mask_logits.shape}, "
+            f"scores={scores.shape}"
+        )
 
     candidates = []
-    spill_weight = cfg.spill_weight if is_multiclass else max(cfg.spill_weight, 0.80)
-    area_bonus = cfg.score_area_bonus if is_multiclass else max(cfg.score_area_bonus, 0.10)
 
-    for i in range(masks.shape[0]):
-        raw = (masks[i] > 0).astype(np.uint8)
+    spill_weight = (
+        cfg.spill_weight
+        if is_multiclass
+        else max(cfg.spill_weight, 0.80)
+    )
+    area_bonus = (
+        cfg.score_area_bonus
+        if is_multiclass
+        else max(cfg.score_area_bonus, 0.10)
+    )
+
+    for i in range(mask_logits.shape[0]):
+        logits_i = np.asarray(
+            mask_logits[i],
+            dtype=np.float32,
+        )
+
+        if logits_i.shape != (h, w):
+            raise RuntimeError(
+                "MedSAM returned unexpected mask-logit size: "
+                f"{logits_i.shape}, expected {(h, w)}"
+            )
+
+        # Original SAM mask_threshold is zero.
+        # logits > 0 <=> sigmoid(logits) > 0.5.
+        raw = (
+            logits_i > 0.0
+        ).astype(np.uint8)
+
         if raw.max() == 0:
             continue
 
-        raw_area = float(raw.sum())
+        raw_area = float(
+            raw.sum()
+        )
         if raw_area <= 0:
             continue
 
-        outside = float((raw > 0).sum() - ((raw > 0) & box_mask).sum())
-        spill_ratio = outside / max(raw_area, 1.0)
+        outside = float(
+            (raw > 0).sum()
+            - (
+                (raw > 0)
+                & box_mask
+            ).sum()
+        )
+
+        spill_ratio = (
+            outside
+            / max(raw_area, 1.0)
+        )
 
         refined = refine_mask_by_prior(
             mask=raw,
@@ -618,31 +727,95 @@ def select_and_build_proposal(
             keep_largest_cc=cfg.keep_largest_cc,
             is_multiclass=is_multiclass,
         )
-        area = float(refined.sum())
+
+        area = float(
+            refined.sum()
+        )
         if area <= 0:
             continue
 
-        inside_ratio = min(1.0, area / box_area)
-        fused_score = float(scores[i]) + area_bonus * inside_ratio - spill_weight * spill_ratio
-        candidates.append({
-            "score": float(fused_score),
-            "mask": refined.astype(bool),
-        })
+        inside_ratio = min(
+            1.0,
+            area / box_area,
+        )
+
+        fused_score = (
+            float(scores[i])
+            + area_bonus * inside_ratio
+            - spill_weight * spill_ratio
+        )
+
+        probability = sigmoid_np(
+            logits_i
+        )
+
+        candidates.append(
+            {
+                "score": float(fused_score),
+                "model_score": float(scores[i]),
+                "mask": refined.astype(bool),
+                "probability": probability.astype(
+                    np.float32
+                ),
+                "candidate_index": int(i),
+            }
+        )
 
     if not candidates:
         return None
 
-    candidates.sort(key=lambda x: x["score"], reverse=True)
+    # IMPORTANT:
+    # ranking is exactly the existing V1 fused-score policy.
+    candidates.sort(
+        key=lambda x: x["score"],
+        reverse=True,
+    )
+
     best = candidates[0]
+
+    best_probability = np.asarray(
+        best["probability"],
+        dtype=np.float32,
+    )
+
+    best_mask = np.asarray(
+        best["mask"],
+        dtype=bool,
+    )
+
+    if (
+        best_probability.shape
+        != best_mask.shape
+    ):
+        raise RuntimeError(
+            "Selected proposal probability/mask "
+            "shape mismatch: "
+            f"{best_probability.shape} "
+            f"vs {best_mask.shape}"
+        )
 
     return Proposal(
         label_id=int(label_id),
         score=float(best["score"]),
-        best_mask=best["mask"].astype(bool),
+        best_mask=best_mask,
+        best_probability=best_probability,
+        best_model_score=float(best["model_score"]),
         teacher_box=box.astype(np.float32),
-        native_box=(native_box.astype(np.float32) if native_box is not None else None),
-        point_coords=(points.astype(np.float32) if points is not None else None),
-        point_labels=(labels.astype(np.int32) if labels is not None else None),
+        native_box=(
+            native_box.astype(np.float32)
+            if native_box is not None
+            else None
+        ),
+        point_coords=(
+            points.astype(np.float32)
+            if points is not None
+            else None
+        ),
+        point_labels=(
+            labels.astype(np.int32)
+            if labels is not None
+            else None
+        ),
     )
 
 
@@ -653,24 +826,83 @@ def generate_teacher_maps(
     is_multiclass: bool,
     teacher_hw: Tuple[int, int],
     cfg: DatasetCfg,
-) -> Tuple[np.ndarray, np.ndarray, List[PromptInstance]]:
-    h, w = teacher_hw
-    confirmed_fg_map = np.zeros((h, w), dtype=np.uint8)
-    tri_map = np.zeros((h, w), dtype=np.uint8)
+) -> Tuple[
+    np.ndarray,
+    np.ndarray,
+    List[PromptInstance],
+]:
+    """
+    Generate teacher-space tri labels using the V2 resolver.
 
-    img_for_sam = enhance_image_by_dataset(teacher_rgb, cfg.enhancement)
-    predictor.set_image(img_for_sam)
+    V2 semantics:
+      outside ALL valid prompt boxes:
+          0
+
+      inside valid prompt-box union but no selected MedSAM
+      proposal confirms foreground:
+          255
+
+      exactly one class confirms foreground:
+          class ID
+
+      multiple DIFFERENT classes confirm foreground:
+          select the class with highest pixel probability
+
+      numerical top1/top2 tie:
+          255
+
+    Same-class instances are aggregated by:
+      support       = OR
+      probability   = MAX
+    """
+    h, w = teacher_hw
+
+    img_for_sam = enhance_image_by_dataset(
+        teacher_rgb,
+        cfg.enhancement,
+    )
+    predictor.set_image(
+        img_for_sam
+    )
 
     proposals: List[Proposal] = []
-    union_all = np.zeros((h, w), dtype=bool)
+
+    # Canonical union must depend on prompts/boxes,
+    # NOT on whether MedSAM succeeds.
+    union_all = np.zeros(
+        (h, w),
+        dtype=bool,
+    )
 
     for ins in prompt_instances:
-        lid = int(ins.label_id) if is_multiclass else 1
+        lid = (
+            int(ins.label_id)
+            if is_multiclass
+            else 1
+        )
+
         if lid <= 0 or lid == 255:
             continue
+
+        canonical_box = _clip_box_to_image(
+            ins.teacher_box,
+            w,
+            h,
+        )
+
+        # Critical V2 fix:
+        # even if MedSAM returns no valid proposal,
+        # this canonical prompt box is still uncertain
+        # supervision rather than background.
+        union_all |= box_to_mask_xyxy(
+            canonical_box,
+            h,
+            w,
+        )
+
         prop = select_and_build_proposal(
             predictor=predictor,
-            teacher_box=ins.teacher_box,
+            teacher_box=canonical_box,
             native_box=ins.native_box,
             label_id=lid,
             point_coords=ins.point_coords,
@@ -679,37 +911,100 @@ def generate_teacher_maps(
             teacher_hw=teacher_hw,
             is_multiclass=is_multiclass,
         )
+
         if prop is None:
             continue
-        proposals.append(prop)
-        union_all |= box_to_mask_xyxy(prop.teacher_box, h, w)
 
-    proposals.sort(key=lambda p: p.score, reverse=True)
+        proposals.append(
+            prop
+        )
 
-    conflict_mask = np.zeros((h, w), dtype=bool)
+    # Keep deterministic ordering for visualization/auditing.
+    proposals.sort(
+        key=lambda p: p.score,
+        reverse=True,
+    )
+
+    class_probabilities: Dict[
+        int,
+        np.ndarray,
+    ] = {}
+
+    class_support_masks: Dict[
+        int,
+        np.ndarray,
+    ] = {}
+
     for prop in proposals:
-        lid = np.uint8(prop.label_id)
-        write = prop.best_mask
+        aggregate_same_class_evidence(
+            class_probabilities=class_probabilities,
+            class_support_masks=class_support_masks,
+            label_id=int(prop.label_id),
+            probability=prop.best_probability,
+            support_mask=prop.best_mask,
+        )
 
-        empty = write & (confirmed_fg_map == 0)
-        confirmed_fg_map[empty] = lid
+    confirmed_fg_map, tri_map, _resolver_stats = (
+        resolve_multiclass_evidence(
+            class_probabilities=class_probabilities,
+            class_support_masks=class_support_masks,
+            union_all=union_all,
+        )
+    )
 
-        conflict = write & (confirmed_fg_map != 0) & (confirmed_fg_map != lid)
-        conflict_mask[conflict] = True
+    # Hard contract:
+    # confirmed foreground and tri pseudo must agree
+    # on every confirmed pixel.
+    confirmed_pixels = (
+        confirmed_fg_map > 0
+    )
 
-    tri_map[union_all] = 255
-    tri_map[confirmed_fg_map > 0] = confirmed_fg_map[confirmed_fg_map > 0]
-    tri_map[conflict_mask] = 255
+    if not np.array_equal(
+        tri_map[confirmed_pixels],
+        confirmed_fg_map[confirmed_pixels],
+    ):
+        raise RuntimeError(
+            "V2 resolver produced inconsistent "
+            "confirmed_fg_map / tri_map."
+        )
 
-    vis_instances = [PromptInstance(
-        teacher_box=p.teacher_box.copy(),
-        native_box=(p.native_box.copy() if p.native_box is not None else None),
-        label_id=int(p.label_id),
-        point_coords=(p.point_coords.copy() if p.point_coords is not None else None),
-        point_labels=(p.point_labels.copy() if p.point_labels is not None else None),
-    ) for p in proposals]
+    # Outside canonical prompt union must remain background.
+    if np.any(
+        tri_map[~union_all] != 0
+    ):
+        raise RuntimeError(
+            "V2 tri pseudo contains nonzero labels "
+            "outside canonical box union."
+        )
 
-    return confirmed_fg_map, tri_map, vis_instances
+    vis_instances = [
+        PromptInstance(
+            teacher_box=p.teacher_box.copy(),
+            native_box=(
+                p.native_box.copy()
+                if p.native_box is not None
+                else None
+            ),
+            label_id=int(p.label_id),
+            point_coords=(
+                p.point_coords.copy()
+                if p.point_coords is not None
+                else None
+            ),
+            point_labels=(
+                p.point_labels.copy()
+                if p.point_labels is not None
+                else None
+            ),
+        )
+        for p in proposals
+    ]
+
+    return (
+        confirmed_fg_map,
+        tri_map,
+        vis_instances,
+    )
 
 
 def find_prompt_json(fold_root: str, split: str, prompt_name: Optional[str] = None) -> str:

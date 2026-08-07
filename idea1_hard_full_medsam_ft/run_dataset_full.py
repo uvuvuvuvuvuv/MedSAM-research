@@ -71,7 +71,11 @@ def main() -> None:
     p.add_argument("--steps_2d", type=int, default=300)
     p.add_argument("--steps_3d", type=int, default=1000)
     p.add_argument("--batch_size", type=int, default=2)
-    p.add_argument("--max_rounds", type=int, default=8)
+    p.add_argument(
+        "--pseudo_protocol",
+        default="student_v2_probability_arbitration",
+        choices=["student_v2_probability_arbitration"],
+    )
     args = p.parse_args()
 
     if args.dataset not in SUPPORTED:
@@ -104,148 +108,162 @@ def main() -> None:
     else:
         print(f"[SKIP] workspace exists: {fold_root}")
 
-    final_teacher_meta = fold_root / "meta" / f"teacher_iteration_final_{args.method}.json"
-    final_round: int | None = None
+    # ========================================================
+    # Active Learning V2 contract audit
+    # ========================================================
 
-    # Stage 2: resume-safe teacher iteration.
-    if final_teacher_meta.is_file():
-        final_round = int(load_json(final_teacher_meta)["final_round"])
-        print(f"[SKIP] teacher iteration complete at round {final_round}")
+    budget_path = (
+        fold_root
+        / "meta"
+        / f"annotation_budget_{args.method}.json"
+    )
+
+    if not budget_path.is_file():
+        raise FileNotFoundError(
+            "Active Learning V2 budget is missing: "
+            f"{budget_path}"
+        )
+
+    budget = load_json(
+        budget_path
+    )
+
+    if (
+        budget.get("budget_version")
+        != "active_learning_v2"
+    ):
+        raise RuntimeError(
+            "This run_dataset_full.py is the V2 pipeline, "
+            "but the workspace contains a non-V2 annotation "
+            "budget. Do not reuse the frozen V1 run tree. "
+            "Use a fresh V2 idea_processed_root.\n"
+            f"budget={budget_path}\n"
+            f"budget_version="
+            f"{budget.get('budget_version')!r}"
+        )
+
+    # ========================================================
+    # Stage 2:
+    # delegate ALL teacher active-learning logic to the
+    # single V2 controller.
+    #
+    # run_dataset_full.py no longer contains:
+    #   - fixed add_2d / add_3d values
+    #   - max_full_2d=20
+    #   - fixed max_rounds=8
+    #   - macro-IoU stopping
+    #
+    # The authoritative controller is:
+    #   run_iterative_teacher.py
+    # ========================================================
+
+    final_teacher_meta = (
+        fold_root
+        / "meta"
+        / f"teacher_iteration_final_{args.method}.json"
+    )
+
+    if not final_teacher_meta.is_file():
+        run(
+            [
+                py,
+                str(
+                    code
+                    / "run_iterative_teacher.py"
+                ),
+
+                "--repo_root",
+                str(repo),
+
+                "--fold_root",
+                str(fold_root),
+
+                "--dataset",
+                args.dataset,
+
+                "--fold",
+                args.fold,
+
+                "--method",
+                args.method,
+
+                "--base_checkpoint",
+                str(args.base_checkpoint),
+
+                "--device",
+                args.device,
+
+                "--seed",
+                str(args.seed),
+
+                "--steps_2d",
+                str(args.steps_2d),
+
+                "--steps_3d",
+                str(args.steps_3d),
+
+                "--batch_size",
+                str(args.batch_size),
+            ],
+            repo,
+        )
+
     else:
-        round0_root = round_root(fold_root, args.method, 0)
-        round0_selection = round0_root / "selection" / "selection.json"
-        if not round0_selection.is_file():
-            run([
-                py, str(code / "02_select_round0_random.py"),
-                "--fold_root", str(fold_root),
-                "--dataset", args.dataset,
-                "--fold", args.fold,
-                "--method", args.method,
-                "--seed", str(args.seed),
-            ], repo)
+        print(
+            "[SKIP] Active Learning V2 teacher "
+            f"iteration marker exists: {final_teacher_meta}"
+        )
 
-        for r in range(args.max_rounds):
-            current_round = round_root(fold_root, args.method, r)
-            selection = current_round / "selection" / "selection.json"
-            if not selection.is_file():
-                raise RuntimeError(f"Missing selection for round {r}: {selection}")
+    if not final_teacher_meta.is_file():
+        raise RuntimeError(
+            "run_iterative_teacher.py completed without "
+            "creating the final teacher metadata: "
+            f"{final_teacher_meta}"
+        )
 
-            pairs = find_pairs_marker(current_round)
-            if pairs is None:
-                run([
-                    py, str(code / "03_build_full_finetune_pairs.py"),
-                    "--fold_root", str(fold_root),
-                    "--dataset", args.dataset,
-                    "--round", str(r),
-                    "--method", args.method,
-                ], repo)
-                pairs = find_pairs_marker(current_round)
-                if pairs is None:
-                    raise RuntimeError(
-                        f"Round {r:02d} pair builder completed without a pairs.json marker "
-                        f"under {current_round}"
-                    )
-            else:
-                print(f"[SKIP] round {r:02d} pairs complete: {pairs}")
+    teacher_meta = load_json(
+        final_teacher_meta
+    )
 
-            input_ckpt = (
-                args.base_checkpoint
-                if r == 0
-                else round_root(fold_root, args.method, r - 1)
-                / "teacher"
-                / "medsam_ft.pth"
-            )
-            output_ckpt = current_round / "teacher" / "medsam_ft.pth"
-            if not output_ckpt.is_file():
-                if not input_ckpt.is_file():
-                    raise FileNotFoundError(input_ckpt)
-                steps = args.steps_3d if args.dataset in {"btcv", "synapse", "acdc", "prostate158"} else args.steps_2d
-                run([
-                    py, str(code / "04_finetune_medsam_mask_decoder.py"),
-                    "--repo_root", str(repo),
-                    "--fold_root", str(fold_root),
-                    "--dataset", args.dataset,
-                    "--round", str(r),
-                    "--method", args.method,
-                    "--checkpoint", str(input_ckpt),
-                    "--device", args.device,
-                    "--seed", str(args.seed),
-                    "--max_steps", str(steps),
-                    "--batch_size", str(args.batch_size),
-                    "--lr", "1e-5",
-                    "--weight_decay", "0.01",
-                    "--dice_weight", "1.0",
-                    "--bce_weight", "1.0",
-                    "--max_grad_norm", "1.0",
-                    "--amp",
-                ], repo)
-            else:
-                print(f"[SKIP] round {r:02d} teacher checkpoint complete")
+    if (
+        teacher_meta.get("protocol")
+        != "active_learning_v2"
+    ):
+        raise RuntimeError(
+            "Final teacher metadata does not belong to "
+            "Active Learning V2. Refusing to mix V1/V2 runs. "
+            f"protocol={teacher_meta.get('protocol')!r}"
+        )
 
-            diagnosis_dir = current_round / "diagnosis"
-            selection_result = diagnosis_dir / "selection_result.json"
-            if not selection_result.is_file():
-                run([
-                    py, str(code / "05_score_remaining_box_pool.py"),
-                    "--repo_root", str(repo),
-                    "--baseline_generator", str(repo / "generate_pseudo_labels.py"),
-                    "--fold_root", str(fold_root),
-                    "--dataset", args.dataset,
-                    "--round", str(r),
-                    "--method", args.method,
-                    "--checkpoint", str(output_ckpt),
-                    "--device", args.device,
-                    "--threshold", "0.5",
-                    "--hard_threshold", "0.5",
-                    "--save_probability", "hard",
-                ], repo)
+    final_decision_status = (
+        teacher_meta.get(
+            "final_decision_status"
+        )
+    )
 
-                next_selection = (
-                    round_root(fold_root, args.method, r + 1)
-                    / "selection"
-                    / "selection.json"
-                )
-                cmd = [
-                    py, str(code / "06_select_next_hard_samples.py"),
-                    "--fold_root", str(fold_root),
-                    "--dataset", args.dataset,
-                    "--round", str(r),
-                    "--method", args.method,
-                    "--iou_threshold", "0.5",
-                    "--add_2d", "5",
-                    "--max_full_2d", "20",
-                    "--add_3d", "1",
-                ]
-                if next_selection.exists():
-                    cmd.append("--overwrite")
-                run(cmd, repo)
-                if not selection_result.is_file():
-                    candidates = sorted(diagnosis_dir.rglob("selection_result.json"))
-                    if len(candidates) == 1:
-                        selection_result = candidates[0]
-                    else:
-                        raise RuntimeError(
-                            f"Round {r:02d} selection completed without a unique "
-                            f"selection_result.json under {diagnosis_dir}"
-                        )
-            else:
-                print(f"[SKIP] round {r:02d} diagnosis/selection complete")
+    if final_decision_status not in {
+        "CONVERGED",
+        "BUDGET_EXHAUSTED",
+    }:
+        raise RuntimeError(
+            "Invalid Active Learning V2 terminal state: "
+            f"{final_decision_status!r}"
+        )
 
-            result = load_json(selection_result)
-            if bool(result.get("stop", False)):
-                final_round = r
-                payload = {
-                    "dataset": args.dataset,
-                    "method": args.method,
-                    "final_round": final_round,
-                    "final_checkpoint": str(output_ckpt),
-                    "stop_result": str(selection_result),
-                }
-                atomic_save_json(payload, final_teacher_meta)
-                break
+    final_round = int(
+        teacher_meta["final_round"]
+    )
 
-        if final_round is None:
-            raise RuntimeError(f"No stop condition reached within max_rounds={args.max_rounds}")
+    print(
+        "[ACTIVE-LEARNING V2 COMPLETE] "
+        f"dataset={args.dataset} "
+        f"round={final_round} "
+        f"status={final_decision_status} "
+        f"min_remaining_iou="
+        f"{teacher_meta.get('minimum_remaining_iou')} "
+        f"hard_remaining="
+        f"{teacher_meta.get('num_hard_candidates_remaining')}"
+    )
 
     # Stage 3: final pseudo/hybrid/student view. Rebuild only if final marker is absent.
     final_method = fold_root / "meta" / f"final_method_{args.method}.json"
@@ -259,6 +277,7 @@ def main() -> None:
             "--fold", args.fold,
             "--final_round", str(final_round),
             "--method", args.method,
+            "--pseudo_protocol", args.pseudo_protocol,
             "--overwrite",
         ], repo)
     else:
@@ -268,8 +287,10 @@ def main() -> None:
         "dataset": args.dataset,
         "fold_root": str(fold_root),
         "final_round": final_round,
+        "active_learning_status": final_decision_status,
         "final_method": str(final_method),
         "student_view": str(args.view_root / args.method / args.dataset / args.fold),
+        "pseudo_protocol": args.pseudo_protocol,
         "status": "MEDSAM_AND_LABEL_STAGES_COMPLETE",
     }, indent=2))
 

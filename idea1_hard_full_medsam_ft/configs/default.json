@@ -38,14 +38,61 @@
     "resume_previous_round": true
   },
   "pseudo": {
-    "contract": "frozen_baseline_generate_pseudo_labels",
-    "probability_threshold": 0.5,
+    "contract": "student_v2_probability_arbitration",
+    "foreground_support": "selected_refined_medsam_best_mask",
+    "probability_source": "same_selected_multimask_candidate",
+    "probability_threshold_semantics": 0.5,
+    "same_class_overlap": "support_or_probability_max",
+    "cross_class_overlap": "pixel_probability_argmax",
+    "numerical_tie_value": 255,
+    "tie_epsilon": 1e-06,
+    "inside_box_unconfirmed_value": 255,
     "outside_box_value": 0,
-    "unknown_value": 255,
-    "conflict_value": 255,
-    "empty_3d_slice_value": 0
+    "empty_3d_slice_value": 0,
+    "additional_margin_threshold": null
   },
   "student": {
-    "inherit_frozen_baseline_hyperparameters": true
+    "protocol": "student_v2_mim_protocol",
+    "loss": "dice_plus_cross_entropy",
+    "ignore_label": 255,
+    "crop_policy_tg3k": "full_image",
+    "deep_supervision_num_outputs": 3,
+    "deep_supervision_weights": [
+      0.5714285714285714,
+      0.2857142857142857,
+      0.14285714285714285
+    ],
+    "freeze_complete_encoder_epochs": 10,
+    "checkpoint_policy": "last_epoch",
+    "use_validation_for_checkpoint_selection": false,
+    "mim_adaptation": true
+  },
+  "active_learning": {
+    "protocol": "active_learning_v2",
+    "round0_selection": "random",
+    "per_round_ratio": 0.01,
+    "minimum_per_round": 5,
+    "per_round_rounding": "ceil",
+    "cumulative_full_ratio": 0.05,
+    "cumulative_full_rounding": "ceil",
+    "two_d": {
+      "annotation_unit": "image",
+      "per_round_formula": "max(ceil(0.01*N_train_images),5)",
+      "cumulative_budget_formula": "max(1,ceil(0.05*N_train_images))",
+      "difficulty_metric": "image_min_iou"
+    },
+    "three_d": {
+      "annotation_unit": "case",
+      "per_round_formula": "max(ceil(0.01*N_train_cases),5)",
+      "cumulative_budget_formula": "max(1,ceil(0.05*N_train_cases))",
+      "difficulty_metric": "case_min_slice_class_iou"
+    },
+    "iou_threshold": 0.5,
+    "convergence_rule": "all_remaining_pseudo_gt_iou_ge_0.5",
+    "decision_status": [
+      "CONTINUE",
+      "CONVERGED",
+      "BUDGET_EXHAUSTED"
+    ]
   }
 }

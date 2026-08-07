@@ -66,23 +66,10 @@ def build_predictor(checkpoint: Path, repo_root: Path, device: str):
     return SamPredictor(model)
 
 
-def probability_for_box(predictor, box: np.ndarray) -> tuple[np.ndarray, float]:
-    try:
-        masks, scores, _ = predictor.predict(
-            box=box.astype(np.float32), multimask_output=True, return_logits=True
-        )
-        masks = np.asarray(masks)
-        scores = np.asarray(scores).reshape(-1)
-        index = int(np.argmax(scores))
-        logits = masks[index].astype(np.float32)
-        probability = 1.0 / (1.0 + np.exp(-np.clip(logits, -40.0, 40.0)))
-        return probability, float(scores[index])
-    except TypeError:
-        masks, scores, _ = predictor.predict(box=box.astype(np.float32), multimask_output=True)
-        masks = np.asarray(masks)
-        scores = np.asarray(scores).reshape(-1)
-        index = int(np.argmax(scores))
-        return masks[index].astype(np.float32), float(scores[index])
+# Student/Teacher V2:
+# Probability diagnostics must come from the SAME formal proposal
+# selected by generate_pseudo_labels.select_and_build_proposal().
+# Do not issue a second independent predictor.predict() here.
 
 
 def save_probability_bundle(
@@ -213,15 +200,55 @@ def main() -> None:
                 is_multiclass=is_multiclass,
             )
             if prop is None:
-                pred_teacher = np.zeros(component_teacher.shape, dtype=bool)
+                pred_teacher = np.zeros(
+                    component_teacher.shape,
+                    dtype=bool,
+                )
+                probability = np.zeros(
+                    component_teacher.shape,
+                    dtype=np.float32,
+                )
                 empty_count += 1
                 proposal_score = float("nan")
+                model_score = float("nan")
             else:
-                pred_teacher = np.asarray(prop.best_mask, dtype=bool)
-                proposal_score = float(prop.score)
-            # Formal selection uses exactly the baseline proposal mask. The
-            # probability map below is diagnostic and does not alter selection.
-            pred_teacher &= box_mask(teacher_box, image.shape[0], image.shape[1])
+                pred_teacher = np.asarray(
+                    prop.best_mask,
+                    dtype=bool,
+                )
+                probability = np.asarray(
+                    prop.best_probability,
+                    dtype=np.float32,
+                )
+                proposal_score = float(
+                    prop.score
+                )
+                model_score = float(
+                    prop.best_model_score
+                )
+
+                if probability.shape != pred_teacher.shape:
+                    raise RuntimeError(
+                        "Formal proposal mask/probability "
+                        "shape mismatch: "
+                        f"{pred_teacher.shape} vs "
+                        f"{probability.shape}"
+                    )
+
+            # Keep the frozen Box constraint for formal selection.
+            pred_teacher &= box_mask(
+                teacher_box,
+                image.shape[0],
+                image.shape[1],
+            )
+
+            # Probability is diagnostic only, but it now belongs
+            # to exactly the same selected multimask candidate.
+            probability = np.where(
+                pred_teacher,
+                probability,
+                0.0,
+            ).astype(np.float32)
             iou = binary_iou(pred_teacher, component_teacher)
             if not np.isfinite(iou):
                 iou = 0.0
@@ -233,10 +260,15 @@ def main() -> None:
             else:
                 class_pred_native[label_id] |= pred_native
 
-            prob, model_score = probability_for_box(predictor, np.asarray(teacher_box, dtype=np.float32))
-            probabilities.append(prob)
-            probability_boxes.append(teacher_box)
-            probability_labels.append(label_id)
+            probabilities.append(
+                probability
+            )
+            probability_boxes.append(
+                teacher_box
+            )
+            probability_labels.append(
+                label_id
+            )
             instance_rows.append(
                 {
                     "dataset": args.dataset,
@@ -255,7 +287,22 @@ def main() -> None:
                 }
             )
 
-        image_macro = float(np.mean(per_ious)) if per_ious else 1.0
+        image_macro = (
+            float(np.mean(per_ious))
+            if per_ious
+            else 1.0
+        )
+
+        image_min = (
+            float(np.min(per_ious))
+            if per_ious
+            else 1.0
+        )
+
+        image_all_pass = int(
+            image_min >= args.hard_threshold
+        )
+
         image_rows.append(
             {
                 "dataset": args.dataset,
@@ -263,9 +310,21 @@ def main() -> None:
                 "slice_name": slice_name,
                 "case_id": get_case_id(item),
                 "num_instances": len(instances),
+
+                # Diagnostic only.
                 "image_macro_iou": image_macro,
+
+                # Active Learning V2 criterion.
+                "image_min_iou": image_min,
+                "all_instance_iou_ge_threshold": (
+                    image_all_pass
+                ),
+
                 "empty_instance_count": empty_count,
-                "hard_candidate": int(image_macro < args.hard_threshold),
+
+                "hard_candidate": int(
+                    image_min < args.hard_threshold
+                ),
             }
         )
 
@@ -311,10 +370,51 @@ def main() -> None:
                 class_ious.append(float(iou))
                 if acc["class_pred"][label_id] == 0:
                     missed += 1
-            case_macro = float(np.mean(class_ious)) if class_ious else 1.0
-            ordered = sorted(float(x) for x in acc["slice_class_ious"])
-            worst_n = max(1, int(math.ceil(0.20 * len(ordered)))) if ordered else 0
-            worst20 = float(np.mean(ordered[:worst_n])) if worst_n else 1.0
+            case_macro = (
+                float(np.mean(class_ious))
+                if class_ious
+                else 1.0
+            )
+
+            ordered = sorted(
+                float(x)
+                for x in acc["slice_class_ious"]
+            )
+
+            worst_n = (
+                max(
+                    1,
+                    int(math.ceil(
+                        0.20 * len(ordered)
+                    )),
+                )
+                if ordered
+                else 0
+            )
+
+            worst20 = (
+                float(np.mean(
+                    ordered[:worst_n]
+                ))
+                if worst_n
+                else 1.0
+            )
+
+            # Active Learning V2:
+            # convergence requires EVERY evaluated
+            # slice/class target in the case to meet
+            # the IoU threshold.
+            case_min = (
+                float(ordered[0])
+                if ordered
+                else 1.0
+            )
+
+            case_all_pass = int(
+                case_min >= args.hard_threshold
+                and missed == 0
+            )
+
             case_rows.append(
                 {
                     "dataset": args.dataset,
@@ -322,10 +422,28 @@ def main() -> None:
                     "case_id": case_id,
                     "num_slices": acc["num_slices"],
                     "num_gt_classes": len(class_ious),
+                    "num_slice_class_evaluations": (
+                        len(ordered)
+                    ),
+
+                    # Diagnostic statistics.
                     "case_macro_3d_iou": case_macro,
-                    "empty_prediction_classes": missed,
                     "worst20_slice_class_iou": worst20,
-                    "hard_candidate": int(case_macro < args.hard_threshold or missed > 0),
+
+                    # Active Learning V2 criterion.
+                    "case_min_slice_class_iou": (
+                        case_min
+                    ),
+                    "all_slice_class_iou_ge_threshold": (
+                        case_all_pass
+                    ),
+
+                    "empty_prediction_classes": missed,
+
+                    "hard_candidate": int(
+                        case_min < args.hard_threshold
+                        or missed > 0
+                    ),
                 }
             )
 
@@ -335,19 +453,78 @@ def main() -> None:
         "gt_pixels_teacher", "pred_pixels_teacher",
     ]
     image_fields = [
-        "dataset", "round", "slice_name", "case_id", "num_instances", "image_macro_iou",
-        "empty_instance_count", "hard_candidate",
+        "dataset",
+        "round",
+        "slice_name",
+        "case_id",
+        "num_instances",
+        "image_macro_iou",
+        "image_min_iou",
+        "all_instance_iou_ge_threshold",
+        "empty_instance_count",
+        "hard_candidate",
     ]
     case_fields = [
-        "dataset", "round", "case_id", "num_slices", "num_gt_classes", "case_macro_3d_iou",
-        "empty_prediction_classes", "worst20_slice_class_iou", "hard_candidate",
+        "dataset",
+        "round",
+        "case_id",
+        "num_slices",
+        "num_gt_classes",
+        "num_slice_class_evaluations",
+        "case_macro_3d_iou",
+        "worst20_slice_class_iou",
+        "case_min_slice_class_iou",
+        "all_slice_class_iou_ge_threshold",
+        "empty_prediction_classes",
+        "hard_candidate",
     ]
     write_csv(instance_rows, paths.diagnosis_dir / "per_instance_metrics.csv", instance_fields)
     write_csv(image_rows, paths.diagnosis_dir / "per_image_metrics.csv", image_fields)
     if is_3d:
         write_csv(case_rows, paths.diagnosis_dir / "per_case_metrics.csv", case_fields)
 
+    # ======================================================
+    # Active Learning V2 convergence audit
+    #
+    # This is NOT the final stopping decision because 3D also
+    # has a cumulative annotation budget. Stage 06 combines
+    # this signal with the remaining Full budget.
+    # ======================================================
+
+    if is_3d:
+        remaining_all_pass = all(
+            int(row["hard_candidate"]) == 0
+            for row in case_rows
+        )
+
+        minimum_remaining_iou = min(
+            (
+                float(row["case_min_slice_class_iou"])
+                for row in case_rows
+            ),
+            default=1.0,
+        )
+
+        num_evaluation_units = len(case_rows)
+
+    else:
+        remaining_all_pass = all(
+            int(row["hard_candidate"]) == 0
+            for row in image_rows
+        )
+
+        minimum_remaining_iou = min(
+            (
+                float(row["image_min_iou"])
+                for row in image_rows
+            ),
+            default=1.0,
+        )
+
+        num_evaluation_units = len(image_rows)
+
     elapsed = time.perf_counter() - start
+
     summary = {
         "dataset": args.dataset,
         "round": args.round,
@@ -355,12 +532,53 @@ def main() -> None:
         "checkpoint": str(args.checkpoint),
         "selection": str(selection_path),
         "threshold": 0.5,
-        "selection_mask_source": "frozen_baseline_generate_pseudo_labels.select_and_build_proposal",
-        "probability_map_role": "diagnosis_only",
+
+        "active_learning_protocol": (
+            "active_learning_v2"
+        ),
+
+        "difficulty_rule": (
+            "minimum_iou_below_threshold"
+        ),
+
+        "convergence_rule": (
+            "all_remaining_gt_targets_iou_ge_threshold"
+        ),
+
+        "selection_mask_source": (
+            "generate_pseudo_labels."
+            "select_and_build_proposal"
+        ),
+
+        "probability_map_role": (
+            "diagnosis_only_same_selected_candidate"
+        ),
+
         "num_box_slices": len(box_names),
         "num_instances": len(instance_rows),
-        "num_hard_images": sum(int(x["hard_candidate"]) for x in image_rows),
-        "num_hard_cases": sum(int(x["hard_candidate"]) for x in case_rows),
+
+        "num_evaluation_units": (
+            num_evaluation_units
+        ),
+
+        "minimum_remaining_iou": float(
+            minimum_remaining_iou
+        ),
+
+        "all_remaining_targets_pass": bool(
+            remaining_all_pass
+        ),
+
+        "num_hard_images": sum(
+            int(x["hard_candidate"])
+            for x in image_rows
+        ),
+
+        "num_hard_cases": sum(
+            int(x["hard_candidate"])
+            for x in case_rows
+        ),
+
         "elapsed_seconds": elapsed,
     }
     atomic_save_json(summary, paths.diagnosis_dir / "diagnosis_summary.json")
