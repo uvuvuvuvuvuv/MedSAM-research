@@ -12,7 +12,7 @@ FORMAL_ROOT="${3:-/storage/baiyuting/data/out_data_idea1/formal_runs/idea1_hard_
 
 METHOD="idea1_hard_full_medsam_ft"
 MEDSAM_REPO="${MEDSAM_REPO:-/storage/baiyuting/data/out_data_idea1/code/idea1_hard_full_medsam_ft/MedSAM-main}"
-IDEA_CODE="$MEDSAM_REPO/idea1_hard_full_medsam_ft"
+IDEA_CODE="$MEDSAM_REPO/methods/idea1"
 SWIN_REPO="${SWIN_REPO:-/storage/baiyuting/data/out_data_idea1/code/idea1_hard_full_medsam_ft/Swin-UMamba-main}"
 FROZEN_PROCESSED="${FROZEN_PROCESSED:-/storage/baiyuting/data/MedSAM-main/data/processed}"
 BASE_CKPT="${BASE_CKPT:-/storage/baiyuting/data/MedSAM-main/work_dir/MedSAM/medsam_vit_b.pth}"

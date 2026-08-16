@@ -34,7 +34,7 @@ from segment_anything import sam_model_registry, SamPredictor
 
 from utils.stage_timer_utils import StageTimer
 
-from idea1_hard_full_medsam_ft.multiclass_resolver_v2 import (
+from methods.common.multiclass_resolver_v2 import (
     aggregate_same_class_evidence,
     resolve_multiclass_evidence,
     sigmoid_np,

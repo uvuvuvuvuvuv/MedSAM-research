@@ -18,7 +18,7 @@ def save_json(obj, path: Path):
 
 
 class SyntheticPipelineTests(unittest.TestCase):
-    def make_fold(self, root: Path) -> Path:
+    def make_fold(self, root: Path, n_samples: int = 8) -> Path:
         fold = root / "processed" / "toy2d" / "fold_0"
         for d in [
             "native_npy/gts", "teacher_npy/imgs", "teacher_npy/gts",
@@ -29,7 +29,7 @@ class SyntheticPipelineTests(unittest.TestCase):
         manifest = []
         prompts = {}
         geometry = {}
-        for idx in range(8):
+        for idx in range(n_samples):
             name = f"sample_{idx:02d}.npy"
             gt = np.zeros((16, 16), dtype=np.uint8)
             gt[3:10, 4:12] = 1
@@ -99,7 +99,7 @@ class SyntheticPipelineTests(unittest.TestCase):
             idea_fold = idea_root / "toy2d/fold_0"
             self.run_script(
                 "02_select_round0_random.py", "--fold_root", str(idea_fold),
-                "--dataset", "toy2d", "--num_2d", "5",
+                "--dataset", "toy2d",
             )
             self.run_script(
                 "03_build_full_finetune_pairs.py", "--fold_root", str(idea_fold),
@@ -107,15 +107,15 @@ class SyntheticPipelineTests(unittest.TestCase):
             )
             selection = json.loads((idea_fold / "rounds/idea1_hard_full_medsam_ft/round_00/selection/selection.json").read_text())
             pairs = json.loads((idea_fold / "rounds/idea1_hard_full_medsam_ft/round_00/finetune_pairs/pairs.json").read_text())
-            self.assertEqual(len(selection["cumulative_full_slice_names"]), 5)
-            self.assertEqual(len(pairs), 5)
+            self.assertEqual(len(selection["cumulative_full_slice_names"]), 1)
+            self.assertEqual(len(pairs), 1)
             for row in pairs:
                 self.assertTrue(Path(row["target_mask"]).is_file())
 
     def test_hard_selection_and_hybrid_assembly(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
-            frozen_fold = self.make_fold(root / "frozen")
+            frozen_fold = self.make_fold(root / "frozen", n_samples=40)
             idea_root = root / "idea" / "processed"
             self.run_script(
                 "01_init_idea1_workspace.py",
@@ -126,16 +126,21 @@ class SyntheticPipelineTests(unittest.TestCase):
             idea_fold = idea_root / "toy2d/fold_0"
             self.run_script(
                 "02_select_round0_random.py", "--fold_root", str(idea_fold),
-                "--dataset", "toy2d", "--num_2d", "5",
+                "--dataset", "toy2d",
             )
             round0 = idea_fold / "rounds/idea1_hard_full_medsam_ft/round_00"
             current = json.loads((round0 / "selection/selection.json").read_text())
             box_names = current["remaining_box_slice_names"]
+            # Current V2 selector uses image_min_iou as the
+            # image-level difficulty metric.  Give every remaining Box
+            # sample a diagnosis row: two hard samples and all others easy.
+            scores = [0.1, 0.4] + [0.8] * (len(box_names) - 2)
             rows = [
                 {"dataset": "toy2d", "round": 0, "slice_name": name, "case_id": "",
-                 "num_instances": 1, "image_macro_iou": score, "empty_instance_count": int(score == 0.1),
+                 "num_instances": 1, "image_min_iou": score,
+                 "empty_instance_count": int(score == 0.1),
                  "hard_candidate": int(score < 0.5)}
-                for name, score in zip(box_names, [0.1, 0.4, 0.8])
+                for name, score in zip(box_names, scores)
             ]
             diag = round0 / "diagnosis"
             diag.mkdir(parents=True, exist_ok=True)
@@ -149,9 +154,9 @@ class SyntheticPipelineTests(unittest.TestCase):
             )
             round1_sel_path = idea_fold / "rounds/idea1_hard_full_medsam_ft/round_01/selection/selection.json"
             round1 = json.loads(round1_sel_path.read_text())
-            self.assertEqual(len(round1["cumulative_full_slice_names"]), 7)
+            self.assertEqual(len(round1["cumulative_full_slice_names"]), 2)
             remaining = round1["remaining_box_slice_names"]
-            self.assertEqual(len(remaining), 1)
+            self.assertEqual(len(remaining), 38)
             box_final = idea_fold / "pseudo_student/tri_box_final_idea1_hard_full_medsam_ft"
             teacher_final = idea_fold / "pseudo_teacher/tri_box_final_idea1_hard_full_medsam_ft"
             box_final.mkdir(parents=True); teacher_final.mkdir(parents=True)
@@ -179,8 +184,8 @@ class SyntheticPipelineTests(unittest.TestCase):
             )
             report = json.loads((idea_fold / "meta/method_validation_idea1_hard_full_medsam_ft.json").read_text())
             self.assertTrue(report["passed"])
-            self.assertEqual(report["counts"]["full"], 7)
-            self.assertEqual(report["counts"]["box"], 1)
+            self.assertEqual(report["counts"]["full"], 2)
+            self.assertEqual(report["counts"]["box"], 38)
 
 
 if __name__ == "__main__":
