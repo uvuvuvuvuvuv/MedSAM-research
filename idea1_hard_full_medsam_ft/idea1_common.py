@@ -305,10 +305,25 @@ def build_case_to_slices(items: Sequence[Mapping[str, Any]]) -> dict[str, list[s
     return dict(sorted(result.items()))
 
 
-def compute_3d_budget(num_train_cases: int, ratio: float = 0.05, absolute_max: int = 5) -> int:
+def compute_3d_budget(
+    num_train_cases: int,
+    ratio: float = 0.05,
+) -> int:
+    """Return the integer case count nearest to the target ratio."""
     if num_train_cases <= 0:
-        raise ValueError("num_train_cases must be positive")
-    return max(1, min(int(absolute_max), int(math.ceil(float(num_train_cases) * float(ratio)))))
+        raise ValueError(
+            "num_train_cases must be positive"
+        )
+
+    raw = (
+        float(num_train_cases)
+        * float(ratio)
+    )
+
+    return max(
+        1,
+        int(math.floor(raw + 0.5)),
+    )
 
 
 def seeded_sample(values: Sequence[str], count: int, seed: int) -> list[str]:

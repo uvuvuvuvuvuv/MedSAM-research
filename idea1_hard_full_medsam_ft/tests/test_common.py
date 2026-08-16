@@ -19,11 +19,14 @@ from idea1_common import (
 class CommonTests(unittest.TestCase):
     def test_budget(self):
         self.assertEqual(compute_3d_budget(18), 1)
+        self.assertEqual(compute_3d_budget(24), 1)
         self.assertEqual(compute_3d_budget(30), 2)
         self.assertEqual(compute_3d_budget(60), 3)
         self.assertEqual(compute_3d_budget(80), 4)
         self.assertEqual(compute_3d_budget(100), 5)
-        self.assertEqual(compute_3d_budget(1000), 5)
+        self.assertEqual(compute_3d_budget(139), 7)
+        self.assertEqual(compute_3d_budget(200), 10)
+        self.assertEqual(compute_3d_budget(1000), 50)
 
     def test_seeded_sample_reproducible(self):
         values = [f"s{i}" for i in range(20)]

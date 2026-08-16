@@ -244,6 +244,7 @@ def main() -> None:
     if final_decision_status not in {
         "CONVERGED",
         "BUDGET_EXHAUSTED",
+        "MAX_ROUNDS_REACHED",
     }:
         raise RuntimeError(
             "Invalid Active Learning V2 terminal state: "

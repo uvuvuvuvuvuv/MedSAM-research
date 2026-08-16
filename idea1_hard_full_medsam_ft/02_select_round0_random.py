@@ -183,7 +183,7 @@ def main() -> None:
             budget["per_round_ratio"]
         ),
         "minimum_per_round": int(
-            budget["minimum_per_round"]
+            budget.get("minimum_per_round") or 0
         ),
         "requested_round_quota": int(
             budget["requested_round_quota"]

@@ -78,7 +78,13 @@ def main() -> None:
     prompt_name = f"prompts_train_{args.method}_box_only.json"
     atomic_save_json(filtered_prompts, generation_fold / "prompts" / prompt_name)
 
-    generator = args.repo_root / "generate_pseudo_labels.py"
+    # Use the Student/Teacher V2 generator shipped with this
+    # experiment repository.  repo_root remains the frozen
+    # MedSAM runtime root and must not be overwritten.
+    generator = (
+        Path(__file__).resolve().parent.parent
+        / "generate_pseudo_labels.py"
+    )
     if not generator.is_file():
         raise FileNotFoundError(generator)
     cmd = [

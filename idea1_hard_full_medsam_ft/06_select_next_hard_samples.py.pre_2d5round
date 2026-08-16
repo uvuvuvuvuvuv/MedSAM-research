@@ -140,6 +140,20 @@ def main() -> None:
         budget_path
     )
 
+    max_acquisition_rounds = int(
+        budget.get(
+            "max_acquisition_rounds",
+            5,
+        )
+    )
+
+    if max_acquisition_rounds != 5:
+        raise RuntimeError(
+            "The formal protocol requires exactly "
+            "5 acquisition rounds; got "
+            f"{max_acquisition_rounds}"
+        )
+
     if (
         budget.get("budget_version")
         != "active_learning_v2"
@@ -324,6 +338,21 @@ def main() -> None:
             )
 
         # ----------------------------------------------------
+        # Priority 3:
+        # five acquisition rounds have been completed.
+        #
+        # Round indices are 0,1,2,3,4. At Round4 we do not
+        # create a Round5 selection even when hard cases remain.
+        # ----------------------------------------------------
+
+        elif args.round >= max_acquisition_rounds - 1:
+            decision_status = "MAX_ROUNDS_REACHED"
+            stop_reason = (
+                "maximum_5_acquisition_rounds_reached_"
+                "with_hard_targets_remaining"
+            )
+
+        # ----------------------------------------------------
         # Otherwise select another hard-case batch.
         # ----------------------------------------------------
 
@@ -445,30 +474,17 @@ def main() -> None:
                 "all_remaining_targets_iou_ge_threshold"
             )
 
-        elif (
-            budget.get("max_acquisition_rounds")
-            is not None
-            and args.round >= (
-                int(
-                    budget[
-                        "max_acquisition_rounds"
-                    ]
-                )
-                - 1
-            )
-        ):
-            # The current round itself has already been
-            # trained and evaluated.  For a five-round 2D
-            # protocol, round_04 is therefore the final
-            # allowed acquisition round.
-            #
-            # Do NOT select samples for round_05.
-            decision_status = (
-                "BUDGET_EXHAUSTED"
+        elif len(full_names) >= max_full:
+            decision_status = "BUDGET_EXHAUSTED"
+            stop_reason = (
+                "2d_full_image_budget_exhausted_"
+                "with_hard_targets_remaining"
             )
 
+        elif args.round >= max_acquisition_rounds - 1:
+            decision_status = "MAX_ROUNDS_REACHED"
             stop_reason = (
-                "2d_max_acquisition_rounds_reached_"
+                "maximum_5_acquisition_rounds_reached_"
                 "with_hard_targets_remaining"
             )
 
@@ -478,40 +494,25 @@ def main() -> None:
                 - len(full_names)
             )
 
-            if capacity <= 0:
-                # Active Learning V2:
-                # the cumulative 5% Full-image budget has
-                # been consumed, but hard pseudo labels
-                # still remain.
-                decision_status = (
-                    "BUDGET_EXHAUSTED"
+            count = min(
+                per_round_quota,
+                capacity,
+                len(candidates),
+            )
+
+            selected_new = [
+                x[3]
+                for x in candidates[:count]
+            ]
+
+            if not selected_new:
+                raise RuntimeError(
+                    "2D hard candidates exist but "
+                    "no new sample was selected."
                 )
 
-                stop_reason = (
-                    "2d_full_image_budget_exhausted_"
-                    "with_hard_targets_remaining"
-                )
-
-            else:
-                count = min(
-                    per_round_quota,
-                    capacity,
-                    len(candidates),
-                )
-
-                selected_new = [
-                    x[3]
-                    for x in candidates[:count]
-                ]
-
-                if not selected_new:
-                    raise RuntimeError(
-                        "2D hard candidates exist but "
-                        "no new sample was selected."
-                    )
-
-                decision_status = "CONTINUE"
-                stop_reason = None
+            decision_status = "CONTINUE"
+            stop_reason = None
 
     # ========================================================
     # Decision result
@@ -522,6 +523,7 @@ def main() -> None:
         in {
             "CONVERGED",
             "BUDGET_EXHAUSTED",
+            "MAX_ROUNDS_REACHED",
         }
     )
 

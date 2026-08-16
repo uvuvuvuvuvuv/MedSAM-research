@@ -47,6 +47,13 @@ from idea1_common import (
 
 
 def load_baseline_generator(path: Path):
+    # V2_DYNAMIC_GENERATOR_IMPORT_PATH
+    generator_path = Path(path).resolve()
+    generator_repo_root = generator_path.parent
+    repo_root_str = str(generator_repo_root)
+    if repo_root_str not in sys.path:
+        sys.path.insert(0, repo_root_str)
+
     spec = importlib.util.spec_from_file_location("frozen_baseline_generate_pseudo_labels", path)
     if spec is None or spec.loader is None:
         raise ImportError(f"Cannot load baseline generator: {path}")

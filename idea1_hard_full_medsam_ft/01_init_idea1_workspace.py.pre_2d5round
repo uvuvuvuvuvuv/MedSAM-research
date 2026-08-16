@@ -101,40 +101,48 @@ def main() -> None:
             "No train annotation units were found."
         )
 
+    # One acquisition round uses approximately 1% of the
+    # annotation units. No artificial minimum of five units.
+    requested_round_quota = int(
+        math.ceil(
+            0.01 * annotation_unit_count
+        )
+    )
+
+    requested_round_quota = min(
+        requested_round_quota,
+        annotation_unit_count,
+    )
+
     # ======================================================
-    # Annotation budget
+    # Active Learning V2 cumulative Full budget
     #
-    # 3D:
-    #   Keep the committed Active Learning V2 behavior.
+    # BOTH 2D and 3D use a cumulative 5% annotation budget.
     #
-    # 2D:
-    #   q = min(max(1, ceil(0.01 * N)), 5)
+    # 2D annotation unit = image
+    # 3D annotation unit = case
     #
-    #   cumulative Full cap =
-    #       min(
-    #           ceil(0.05 * N),
-    #           5 * q,
-    #       )
-    #
-    #   acquisition rounds <= 5.
+    # Because annotation units are indivisible, the 5%
+    # budget is rounded UP to the nearest whole unit.
     # ======================================================
 
     if is_3d:
-        # --------------------------------------------------
-        # Preserve committed 3D behavior unchanged.
-        # --------------------------------------------------
-        requested_round_quota = max(
-            int(math.ceil(
-                0.01 * annotation_unit_count
+        # Case-level labels are indivisible. Use the integer
+        # number of cases nearest to 5%, with at least one case.
+        #
+        # Examples:
+        # BTCV 24 -> 1
+        # Synapse 18 -> 1
+        # ACDC 200 -> 10
+        # Prostate158 139 -> 7
+        max_full = max(
+            1,
+            int(math.floor(
+                0.05 * annotation_unit_count + 0.5
             )),
-            5,
         )
-
-        requested_round_quota = min(
-            requested_round_quota,
-            annotation_unit_count,
-        )
-
+    else:
+        # 2D follows the agreed ceiling-based ~5% budget.
         max_full = max(
             1,
             int(math.ceil(
@@ -142,33 +150,8 @@ def main() -> None:
             )),
         )
 
-    else:
-        # --------------------------------------------------
-        # New 2D protocol.
-        # --------------------------------------------------
-        requested_round_quota = min(
-            max(
-                1,
-                int(math.ceil(
-                    0.01 * annotation_unit_count
-                )),
-            ),
-            5,
-            annotation_unit_count,
-        )
-
-        five_percent_cap = max(
-            1,
-            int(math.ceil(
-                0.05 * annotation_unit_count
-            )),
-        )
-
-        max_full = min(
-            five_percent_cap,
-            5 * requested_round_quota,
-        )
-
+    # The actual Round0 / per-round quota can never exceed
+    # the cumulative 5% annotation budget.
     effective_round_quota = min(
         requested_round_quota,
         max_full,
@@ -190,7 +173,12 @@ def main() -> None:
         "num_annotation_units": annotation_unit_count,
 
         "per_round_ratio": 0.01,
-        "minimum_per_round": (5 if is_3d else 1),
+        # No artificial minimum sample count is used.
+        "minimum_per_round": 0,
+        "per_round_formula": (
+            "ceil(0.01*N_annotation_units)"
+        ),
+        "max_acquisition_rounds": 5,
         "rounding_per_round": "ceil",
         "requested_round_quota": requested_round_quota,
 
@@ -199,32 +187,16 @@ def main() -> None:
 
         "max_full": max_full,
 
-        "max_acquisition_rounds": (
-            None if is_3d else 5
-        ),
-
-        "two_d_round_quota_formula": (
-            "min(max(1,ceil(0.01*N)),5)"
-            if not is_3d
-            else None
-        ),
-
-        "two_d_max_full_formula": (
-            "min(max(1,ceil(0.05*N)),"
-            "5*round_quota)"
-            if not is_3d
-            else None
-        ),
-
         # Unified 2D/3D cumulative annotation budget.
         "cumulative_full_ratio": 0.05,
-        "cumulative_cap_rounding": "ceil",
+        "cumulative_cap_rounding": (
+            "nearest" if is_3d else "ceil"
+        ),
         "cumulative_formula": (
-            "max(1,ceil(0.05*N_annotation_units))"
+            "max(1,round_nearest(0.05*N_train_cases))"
             if is_3d
             else
-            "min(max(1,ceil(0.05*N_images)),"
-            "5*round_quota)"
+            "max(1,ceil(0.05*N_train_images))"
         ),
 
         # Retained for backward-compatible metadata.
@@ -232,10 +204,10 @@ def main() -> None:
             0.05 if is_3d else None
         ),
         "three_d_cap_rounding": (
-            "ceil" if is_3d else None
+            "nearest" if is_3d else None
         ),
         "three_d_formula": (
-            "max(1,ceil(0.05*N_train_cases))"
+            "max(1,round_nearest(0.05*N_train_cases))"
             if is_3d
             else None
         ),

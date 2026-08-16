@@ -331,23 +331,47 @@ def main() -> None:
     # CONVERGED or BUDGET_EXHAUSTED.
     # ========================================================
 
-    protocol_round_horizon = max(
-        1,
-        int(math.ceil(
-            max_full
-            / per_round_quota
-        )),
-    )
-
     requested_round_horizon = max(
         0,
         int(args.max_rounds),
     )
 
-    effective_max_rounds = max(
-        protocol_round_horizon,
-        requested_round_horizon,
-    )
+    if is_3d:
+        # Preserve the committed 3D controller behavior.
+        protocol_round_horizon = max(
+            1,
+            int(math.ceil(
+                max_full
+                / per_round_quota
+            )),
+        )
+
+        effective_max_rounds = max(
+            protocol_round_horizon,
+            requested_round_horizon,
+        )
+
+    else:
+        # 2D scientific protocol:
+        # no more than five acquisition/training rounds.
+        protocol_round_horizon = int(
+            budget.get(
+                "max_acquisition_rounds",
+                5,
+            )
+        )
+
+        if protocol_round_horizon <= 0:
+            raise RuntimeError(
+                "Invalid 2D max_acquisition_rounds="
+                f"{protocol_round_horizon}"
+            )
+
+        # A CLI safety horizon must never enlarge the
+        # scientific 2D five-round protocol.
+        effective_max_rounds = (
+            protocol_round_horizon
+        )
 
     if (
         args.start_round < 0
@@ -683,7 +707,7 @@ def main() -> None:
 
                 "--baseline_generator",
                 str(
-                    args.repo_root
+                    script_root.parent
                     / "generate_pseudo_labels.py"
                 ),
 
