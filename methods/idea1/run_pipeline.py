@@ -13,7 +13,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from idea1_common import METHOD_DEFAULT, atomic_save_json, load_json
+from common import METHOD_DEFAULT, atomic_save_json, load_json
 
 
 SUPPORTED = {
@@ -95,7 +95,7 @@ def main() -> None:
     # Stage 1: isolated workspace.
     if not lineage.is_file():
         run([
-            py, str(code / "01_init_idea1_workspace.py"),
+            py, str(code / "init_workspace.py"),
             "--frozen_processed_root", str(args.frozen_processed_root),
             "--idea_processed_root", str(args.idea_processed_root),
             "--dataset", args.dataset,
@@ -133,7 +133,7 @@ def main() -> None:
         != "active_learning_v2"
     ):
         raise RuntimeError(
-            "This run_dataset_full.py is the V2 pipeline, "
+            "This run_pipeline.py is the V2 pipeline, "
             "but the workspace contains a non-V2 annotation "
             "budget. Do not reuse the frozen V1 run tree. "
             "Use a fresh V2 idea_processed_root.\n"
@@ -147,14 +147,14 @@ def main() -> None:
     # delegate ALL teacher active-learning logic to the
     # single V2 controller.
     #
-    # run_dataset_full.py no longer contains:
+    # run_pipeline.py no longer contains:
     #   - fixed add_2d / add_3d values
     #   - max_full_2d=20
     #   - fixed max_rounds=8
     #   - macro-IoU stopping
     #
     # The authoritative controller is:
-    #   run_iterative_teacher.py
+    #   run_teacher_adaptation.py
     # ========================================================
 
     final_teacher_meta = (
@@ -169,7 +169,7 @@ def main() -> None:
                 py,
                 str(
                     code
-                    / "run_iterative_teacher.py"
+                    / "run_teacher_adaptation.py"
                 ),
 
                 "--repo_root",
@@ -216,7 +216,7 @@ def main() -> None:
 
     if not final_teacher_meta.is_file():
         raise RuntimeError(
-            "run_iterative_teacher.py completed without "
+            "run_teacher_adaptation.py completed without "
             "creating the final teacher metadata: "
             f"{final_teacher_meta}"
         )
@@ -270,7 +270,7 @@ def main() -> None:
     final_method = fold_root / "meta" / f"final_method_{args.method}.json"
     if not final_method.is_file():
         run([
-            py, str(code / "run_final_pipeline.py"),
+            py, str(code / "build_final_supervision.py"),
             "--repo_root", str(repo),
             "--fold_root", str(fold_root),
             "--view_root", str(args.view_root),

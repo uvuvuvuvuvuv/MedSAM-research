@@ -102,8 +102,6 @@ except Exception:
             def update(self, *args, **kwargs): pass
             def finish(self, *args, **kwargs): pass
 
-DEFAULT_PROCESSED_ROOT = "/storage/baiyuting/data/MedSAM-main/data/processed"
-
 # Baseline V1 scope: 3D4 + 2D7. If you still keep monuseg in a later run,
 # pass --datasets ... ,monuseg explicitly.
 DEFAULT_TARGET_DATASETS = [
@@ -563,7 +561,7 @@ def process_one_dataset(
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--processed_root", type=str, default=DEFAULT_PROCESSED_ROOT)
+    parser.add_argument("--processed_root", type=str, required=True)
     parser.add_argument(
         "--datasets",
         type=str,

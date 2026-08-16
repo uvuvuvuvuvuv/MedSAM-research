@@ -6,7 +6,7 @@ import argparse
 import json
 from pathlib import Path
 
-from idea1_common import (
+from common import (
     METHOD_DEFAULT,
     RoundPaths,
     atomic_save_json,
@@ -58,7 +58,7 @@ def main() -> None:
         raise FileNotFoundError(
             "Active-learning annotation budget is missing: "
             f"{budget_path}. "
-            "Run 01_init_idea1_workspace.py first."
+            "Run init_workspace.py first."
         )
 
     budget = load_json(

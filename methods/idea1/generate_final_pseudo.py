@@ -10,7 +10,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from idea1_common import (
+from common import (
     METHOD_DEFAULT,
     RoundPaths,
     atomic_save_json,
@@ -82,7 +82,7 @@ def main() -> None:
     # experiment repository.  repo_root remains the frozen
     # MedSAM runtime root and must not be overwritten.
     generator = (
-        Path(__file__).resolve().parent.parent
+        Path(__file__).resolve().parents[2]
         / "generate_pseudo_labels.py"
     )
     if not generator.is_file():

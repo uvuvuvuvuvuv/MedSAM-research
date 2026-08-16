@@ -69,7 +69,7 @@ Matched Baseline and Idea1 experiments share the probability-aware multiclass
 resolver:
 
 ```text
-methods/common/multiclass_resolver_v2.py
+methods/common/multiclass_resolver.py
 ```
 
 The canonical MedSAM pseudo-label generator remains at repository level:

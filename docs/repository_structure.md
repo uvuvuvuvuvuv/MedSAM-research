@@ -34,7 +34,7 @@ The relevant public layout is:
 │   │   └── README.md
 │   ├── common/
 │   │   ├── __init__.py
-│   │   └── multiclass_resolver_v2.py
+│   │   └── multiclass_resolver.py
 │   └── idea1/
 │       ├── configs/
 │       ├── scripts/
@@ -104,7 +104,7 @@ methods/common/
 The current shared probability-aware multiclass resolver is:
 
 ```text
-methods/common/multiclass_resolver_v2.py
+methods/common/multiclass_resolver.py
 ```
 
 Matched Baseline and Idea1 experiments must use the same arbitration logic.

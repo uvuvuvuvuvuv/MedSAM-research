@@ -34,15 +34,13 @@ from segment_anything import sam_model_registry, SamPredictor
 
 from utils.stage_timer_utils import StageTimer
 
-from methods.common.multiclass_resolver_v2 import (
+from methods.common.multiclass_resolver import (
     aggregate_same_class_evidence,
     resolve_multiclass_evidence,
     sigmoid_np,
 )
 
 
-DEFAULT_BASE_DIR = "/storage/baiyuting/data/MedSAM-main/data"
-DEFAULT_CHECKPOINT = "/storage/baiyuting/data/MedSAM-main/work_dir/MedSAM/medsam_vit_b.pth"
 MODEL_TYPE = "vit_b"
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -1265,8 +1263,8 @@ def process_dataset(
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--base_dir", type=str, default=DEFAULT_BASE_DIR)
-    parser.add_argument("--checkpoint", type=str, default=DEFAULT_CHECKPOINT)
+    parser.add_argument("--base_dir", type=str, required=True)
+    parser.add_argument("--checkpoint", type=str, required=True)
     parser.add_argument("--datasets", type=str, default=",".join(DEFAULT_TARGET_DATASETS), help="comma-separated datasets")
     parser.add_argument("--fold", type=str, default="all", help='fold_0/fold_1/... or "all"')
     parser.add_argument("--split", type=str, default="train", choices=["train", "test", "all"])

@@ -6,7 +6,7 @@ import argparse
 import json
 from pathlib import Path
 
-from idea1_common import METHOD_DEFAULT, atomic_save_json, copy_or_symlink
+from common import METHOD_DEFAULT, atomic_save_json, copy_or_symlink
 
 
 def build_view(fold_root: Path, view_fold: Path, pseudo_name: str, overwrite: bool) -> None:

@@ -17,7 +17,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from idea1_common import METHOD_DEFAULT, RoundPaths, atomic_save_json, load_json, load_rgb_uint8
+from common import METHOD_DEFAULT, RoundPaths, atomic_save_json, load_json, load_rgb_uint8
 
 MODEL_TYPE = "vit_b"
 

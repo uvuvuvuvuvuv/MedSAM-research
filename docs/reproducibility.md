@@ -185,7 +185,7 @@ The reported 3D experiments must not be regenerated solely to force the later
 Matched Baseline and Idea1 pseudo-label generation uses:
 
 ```text
-methods/common/multiclass_resolver_v2.py
+methods/common/multiclass_resolver.py
 ```
 
 The same probability-aware arbitration logic must be used by both arms.
@@ -340,7 +340,7 @@ OK
 After source-code refactors, run:
 
 ```bash
-python -m py_compile   generate_pseudo_labels.py   methods/common/multiclass_resolver_v2.py   methods/idea1/*.py
+python -m py_compile   generate_pseudo_labels.py   methods/common/multiclass_resolver.py   methods/idea1/*.py
 ```
 
 Then:

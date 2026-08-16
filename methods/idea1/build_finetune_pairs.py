@@ -8,7 +8,7 @@ from pathlib import Path
 
 import numpy as np
 
-from idea1_common import (
+from common import (
     METHOD_DEFAULT,
     RoundPaths,
     atomic_save_json,

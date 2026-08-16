@@ -9,7 +9,7 @@ import re
 from pathlib import Path
 from typing import Any
 
-from idea1_common import (
+from common import (
     ContractError,
     atomic_save_json,
     current_timestamp,

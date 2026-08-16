@@ -91,18 +91,18 @@ class SyntheticPipelineTests(unittest.TestCase):
             frozen_fold = self.make_fold(root / "frozen")
             idea_root = root / "idea" / "processed"
             self.run_script(
-                "01_init_idea1_workspace.py",
+                "init_workspace.py",
                 "--frozen_processed_root", str(frozen_fold.parents[1]),
                 "--idea_processed_root", str(idea_root),
                 "--dataset", "toy2d", "--shared_mode", "copy", "--boxonly_mode", "copy",
             )
             idea_fold = idea_root / "toy2d/fold_0"
             self.run_script(
-                "02_select_round0_random.py", "--fold_root", str(idea_fold),
+                "select_round0.py", "--fold_root", str(idea_fold),
                 "--dataset", "toy2d",
             )
             self.run_script(
-                "03_build_full_finetune_pairs.py", "--fold_root", str(idea_fold),
+                "build_finetune_pairs.py", "--fold_root", str(idea_fold),
                 "--dataset", "toy2d", "--round", "0",
             )
             selection = json.loads((idea_fold / "rounds/idea1_hard_full_medsam_ft/round_00/selection/selection.json").read_text())
@@ -118,14 +118,14 @@ class SyntheticPipelineTests(unittest.TestCase):
             frozen_fold = self.make_fold(root / "frozen", n_samples=40)
             idea_root = root / "idea" / "processed"
             self.run_script(
-                "01_init_idea1_workspace.py",
+                "init_workspace.py",
                 "--frozen_processed_root", str(frozen_fold.parents[1]),
                 "--idea_processed_root", str(idea_root),
                 "--dataset", "toy2d", "--shared_mode", "copy", "--boxonly_mode", "copy",
             )
             idea_fold = idea_root / "toy2d/fold_0"
             self.run_script(
-                "02_select_round0_random.py", "--fold_root", str(idea_fold),
+                "select_round0.py", "--fold_root", str(idea_fold),
                 "--dataset", "toy2d",
             )
             round0 = idea_fold / "rounds/idea1_hard_full_medsam_ft/round_00"
@@ -149,7 +149,7 @@ class SyntheticPipelineTests(unittest.TestCase):
                 w = csv.DictWriter(f, fieldnames=list(rows[0]))
                 w.writeheader(); w.writerows(rows)
             self.run_script(
-                "06_select_next_hard_samples.py", "--fold_root", str(idea_fold),
+                "select_hard_samples.py", "--fold_root", str(idea_fold),
                 "--dataset", "toy2d", "--round", "0",
             )
             round1_sel_path = idea_fold / "rounds/idea1_hard_full_medsam_ft/round_01/selection/selection.json"
@@ -170,16 +170,16 @@ class SyntheticPipelineTests(unittest.TestCase):
                 tri_t[10:16,12:20] = 1
                 np.save(teacher_final/name, tri_t)
             self.run_script(
-                "08_assemble_method_supervision.py", "--fold_root", str(idea_fold),
+                "assemble_supervision.py", "--fold_root", str(idea_fold),
                 "--dataset", "toy2d", "--final_round", "1",
             )
             view_root = root / "views"
             self.run_script(
-                "09_build_student_view.py", "--fold_root", str(idea_fold),
+                "build_student_view.py", "--fold_root", str(idea_fold),
                 "--view_root", str(view_root), "--dataset", "toy2d", "--build_boxonly",
             )
             self.run_script(
-                "10_validate_method_data.py", "--fold_root", str(idea_fold),
+                "validate_data.py", "--fold_root", str(idea_fold),
                 "--dataset", "toy2d", "--final_round", "1",
             )
             report = json.loads((idea_fold / "meta/method_validation_idea1_hard_full_medsam_ft.json").read_text())

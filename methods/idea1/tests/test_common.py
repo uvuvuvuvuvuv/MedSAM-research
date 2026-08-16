@@ -6,7 +6,7 @@ from pathlib import Path
 
 import numpy as np
 
-from idea1_common import (
+from common import (
     binary_iou,
     compute_3d_budget,
     map_native_mask_to_target,

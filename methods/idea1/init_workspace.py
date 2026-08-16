@@ -7,7 +7,7 @@ import json
 import math
 from pathlib import Path
 
-from idea1_common import (
+from common import (
     METHOD_DEFAULT,
     assert_output_isolated,
     atomic_save_json,

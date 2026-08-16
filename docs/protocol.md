@@ -154,7 +154,7 @@ Baseline and Idea1 use the same probability-aware multiclass arbitration
 implementation:
 
 ```text
-methods/common/multiclass_resolver_v2.py
+methods/common/multiclass_resolver.py
 ```
 
 This shared resolver is part of the fairness contract.

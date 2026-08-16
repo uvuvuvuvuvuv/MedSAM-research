@@ -9,7 +9,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from idea1_common import (
+from common import (
     METHOD_DEFAULT,
     RoundPaths,
     atomic_save_json,
@@ -436,7 +436,7 @@ def main() -> None:
             python,
             str(
                 script_root
-                / "02_select_round0_random.py"
+                / "select_round0.py"
             ),
             "--fold_root",
             str(args.fold_root),
@@ -548,7 +548,7 @@ def main() -> None:
                 python,
                 str(
                     script_root
-                    / "03_build_full_finetune_pairs.py"
+                    / "build_finetune_pairs.py"
                 ),
                 "--fold_root",
                 str(args.fold_root),
@@ -594,7 +594,7 @@ def main() -> None:
                 python,
                 str(
                     script_root
-                    / "04_finetune_medsam_mask_decoder.py"
+                    / "finetune_teacher.py"
                 ),
 
                 "--repo_root",
@@ -699,7 +699,7 @@ def main() -> None:
                 python,
                 str(
                     script_root
-                    / "05_score_remaining_box_pool.py"
+                    / "score_box_pool.py"
                 ),
 
                 "--repo_root",
@@ -707,7 +707,7 @@ def main() -> None:
 
                 "--baseline_generator",
                 str(
-                    script_root.parent
+                    script_root.parents[1]
                     / "generate_pseudo_labels.py"
                 ),
 
@@ -783,7 +783,7 @@ def main() -> None:
                 python,
                 str(
                     script_root
-                    / "06_select_next_hard_samples.py"
+                    / "select_hard_samples.py"
                 ),
 
                 "--fold_root",

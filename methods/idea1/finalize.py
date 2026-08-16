@@ -6,7 +6,7 @@ import argparse
 import json
 from pathlib import Path
 
-from idea1_common import METHOD_DEFAULT, RoundPaths, atomic_save_json, current_timestamp, load_json, sha256_file
+from common import METHOD_DEFAULT, RoundPaths, atomic_save_json, current_timestamp, load_json, sha256_file
 
 
 def main() -> None:

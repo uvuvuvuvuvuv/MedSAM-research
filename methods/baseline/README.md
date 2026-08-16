@@ -13,7 +13,7 @@ Canonical implementation:
 
 Shared probability-aware multi-class arbitration:
 
-    ../common/multiclass_resolver_v2.py
+    ../common/multiclass_resolver.py
 
 No Teacher adaptation or Full-label acquisition is used in the baseline.
 

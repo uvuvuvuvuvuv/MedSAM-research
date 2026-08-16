@@ -7,7 +7,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from idea1_common import METHOD_DEFAULT, RoundPaths
+from common import METHOD_DEFAULT, RoundPaths
 
 
 def run(cmd: list[str], cwd: Path) -> None:
@@ -38,29 +38,29 @@ def main() -> None:
     checkpoint = args.checkpoint or RoundPaths(args.fold_root, args.method, args.final_round).teacher_dir / "medsam_ft.pth"
 
     commands = [
-        [python, str(root / "07_generate_method_tri_pseudo.py"), "--repo_root", str(args.repo_root),
+        [python, str(root / "generate_final_pseudo.py"), "--repo_root", str(args.repo_root),
          "--fold_root", str(args.fold_root), "--dataset", args.dataset, "--fold", args.fold,
          "--final_round", str(args.final_round), "--method", args.method,
          "--checkpoint", str(checkpoint),
          "--pseudo_protocol", args.pseudo_protocol],
-        [python, str(root / "08_assemble_method_supervision.py"), "--fold_root", str(args.fold_root),
+        [python, str(root / "assemble_supervision.py"), "--fold_root", str(args.fold_root),
          "--dataset", args.dataset, "--final_round", str(args.final_round), "--method", args.method],
-        [python, str(root / "09_build_student_view.py"), "--fold_root", str(args.fold_root),
+        [python, str(root / "build_student_view.py"), "--fold_root", str(args.fold_root),
          "--view_root", str(args.view_root), "--dataset", args.dataset, "--fold", args.fold,
          "--method", args.method, "--build_boxonly"],
-        [python, str(root / "10_validate_method_data.py"), "--fold_root", str(args.fold_root),
+        [python, str(root / "validate_data.py"), "--fold_root", str(args.fold_root),
          "--dataset", args.dataset, "--final_round", str(args.final_round), "--method", args.method],
     ]
     for cmd in commands:
         if args.overwrite and Path(cmd[1]).name in {
-            "07_generate_method_tri_pseudo.py", "08_assemble_method_supervision.py", "09_build_student_view.py"
+            "generate_final_pseudo.py", "assemble_supervision.py", "build_student_view.py"
         }:
             cmd.append("--overwrite")
         run(cmd, args.repo_root)
 
     student_view = args.view_root / args.method / args.dataset / args.fold
     run(
-        [python, str(root / "11_finalize_method.py"), "--fold_root", str(args.fold_root),
+        [python, str(root / "finalize.py"), "--fold_root", str(args.fold_root),
          "--dataset", args.dataset, "--final_round", str(args.final_round), "--method", args.method,
          "--student_view", str(student_view)],
         args.repo_root,

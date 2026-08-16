@@ -16,7 +16,7 @@ import cv2
 import numpy as np
 import torch
 
-from idea1_common import (
+from common import (
     METHOD_DEFAULT,
     RoundPaths,
     atomic_save_json,

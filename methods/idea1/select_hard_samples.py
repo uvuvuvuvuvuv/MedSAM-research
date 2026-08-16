@@ -6,7 +6,7 @@ import argparse
 import json
 from pathlib import Path
 
-from idea1_common import (
+from common import (
     METHOD_DEFAULT,
     RoundPaths,
     atomic_save_json,
@@ -145,7 +145,7 @@ def main() -> None:
         != "active_learning_v2"
     ):
         raise RuntimeError(
-            "06_select_next_hard_samples.py requires "
+            "select_hard_samples.py requires "
             "budget_version='active_learning_v2', got "
             f"{budget.get('budget_version')!r}"
         )
@@ -597,7 +597,7 @@ def main() -> None:
         ),
 
         # Backward-compatible stop flag for
-        # run_iterative_teacher.py.
+        # run_teacher_adaptation.py.
         "stop": stop,
 
         "stop_reason": (
